@@ -20,6 +20,9 @@ def _line(ok: bool | None, label: str, detail: str = "") -> None:
 
 
 def main() -> int:
+    from ai_video_studio.app import ensure_std_streams
+
+    ensure_std_streams()
     failures = 0
 
     py_ok = sys.version_info[:2] >= MIN_PYTHON
