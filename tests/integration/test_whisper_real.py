@@ -92,14 +92,18 @@ def test_english_transcription_cpu(wavs):
 
 
 def test_bengali_transcription_cpu(wavs):
-    result = transcribe_file(wavs["bn"], TranscriptionOptions(model_path=MODEL_DIR, language="bn", device="cpu"))
+    # VAD is turned off here: the robotic synthetic Bengali voice is easily classified as
+    # non-speech, and this test checks the Bengali language path, not voice detection.
+    options = TranscriptionOptions(model_path=MODEL_DIR, language="bn", device="cpu", vad_filter=False)
+    result = transcribe_file(wavs["bn"], options)
     text = _text(result)
-    print(f"\n[real whisper/bn] device={result.device} text={text!r}")
+    detail = f"segments={len(result.track.segments)} warnings={result.warnings} text={text!r}"
+    print(f"\n[real whisper/bn] device={result.device} {detail}")
     assert result.language == "bn"
     bengali_chars = sum(1 for ch in text if "ঀ" <= ch <= "৿")
     # Only the script is asserted: accuracy on synthetic speech with small models is low,
     # so quality must be judged by a person on real recordings.
-    assert bengali_chars >= 5, "expected Bengali script output when language=bn"
+    assert bengali_chars >= 5, f"expected Bengali script output when language=bn; {detail}"
     _check_timing(result)
 
 
