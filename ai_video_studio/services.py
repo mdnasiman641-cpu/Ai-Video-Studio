@@ -91,6 +91,11 @@ class Services:
     def close(self) -> bool:
         """Returns False if a job was still running (its worker thread cannot be stopped)."""
         stopped = self.jobs.shutdown()
+        # Release a loaded Whisper model now rather than during interpreter teardown, when
+        # native library destructors (CTranslate2/OpenMP) may run in an unsafe order.
+        from ai_video_studio.captions.transcriber import clear_model_cache
+
+        clear_model_cache()
         if not stopped:
             log.warning("A background job did not stop in time; it will be marked interrupted on next start")
             return False

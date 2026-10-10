@@ -105,6 +105,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: python -m pytest -v -rs -s --durations=15 --junitxml=test-results.xml
 
+      - name: "Diagnostics: exit status of test groups in separate processes (Windows)"
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          for group in tests/unit tests/integration/test_whisper_real.py "tests/integration --deselect tests/integration/test_whisper_real.py" tests/ui; do
+            python -m pytest -q -p no:cacheprovider $group > group.log 2>&1
+            code=$?
+            echo "[$group] exit=$code :: $(grep -E 'passed|failed|error' group.log | tail -1) $(grep -c 'Fatal Python error' group.log) fatal"
+          done
+
       - name: Upload test results and logs
         if: always()
         uses: actions/upload-artifact@v4

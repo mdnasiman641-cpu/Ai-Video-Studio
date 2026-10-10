@@ -36,9 +36,34 @@ Phase 1 adds no other dependencies. Planned additions, each checked for compatib
 ## Phase plan
 
 1. **Foundation**: done (see README).
-2. **Captions**: done (v0.2.0). Not verified in the build environment: real Whisper inference
-   (Hugging Face model download was blocked by the network policy) and anything Windows- or
-   GPU-specific (CUDA DLL loading, NVENC, Windows Credential Manager, Windows fonts).
+2. **Captions**: done (v0.2.0). Windows-readiness verification done in v0.2.1 (see below).
+
+## Phase 2 verification (v0.2.1, GitHub Actions `windows-latest` + `ubuntu-latest`)
+
+Verified with real tools on Windows and Linux runners:
+- FFmpeg/FFprobe detection and metadata
+- PySide6 start-up: native Windows platform, `pythonw.exe`, `run.bat`
+- `setup.bat`, `run.bat`, `run_tests.bat`
+- Project save and reopen, caption editing, SRT import/export, styles and presets
+- libass burn-in, checked by pixel comparison, and export cancel cleanup
+- Windows Credential Manager
+- Real faster-whisper English transcription, both directly and as a full video job
+- Language auto-detect
+- CUDA → CPU fallback on machines without a GPU
+
+Bugs found by these checks and fixed: PyAV 19 broke all real transcription; `pythonw` had no
+stdout/stderr; cancelled exports on Windows left FFmpeg running (launcher shims) and left partial
+files behind.
+
+Still unverified:
+- **Bengali accuracy.** Synthetic espeak-ng Bengali was not written in Bengali script by tiny
+  (romanised) or small (emoji only). This needs a real Bengali recording, preferably with
+  medium or large-v3.
+- **NVIDIA CUDA transcription and NVENC encoding.** No GPU is available in CI. Only the detection
+  and the CPU fallback are tested.
+- **A real Windows 10/11 desktop.** CI runs on Windows Server.
+
+Next phase (not started): **Phase 3, face tracking and auto-reframe.**
 3. **Tracking/reframe**: detection on sampled frames, IoU/centroid tracker with target selection,
    confidence, smoothing (EMA + dead zone + max speed), loss recovery (hold, then ease to centre),
    crop-path editor with manual keyframes, export with a crop path that varies over time

@@ -2,6 +2,30 @@
 
 All notable changes are listed here. Versions follow semantic versioning.
 
+## [0.2.1] - Unreleased
+
+### Added
+- GitHub Actions CI on `windows-latest` and `ubuntu-latest`:
+  - full test suite with real faster-whisper models (tiny and small)
+  - app smoke test with the native Windows platform and under `pythonw.exe`
+  - `setup.bat`, `run.bat` and `run_tests.bat` executed on Windows
+- `--smoke-test` start-up mode.
+- Real-Whisper integration tests (synthetic speech fixtures in `tests/fixtures`), hardware detection
+  tests, and a real credential-store test. CI fails, rather than skips, when the model is missing.
+- Bengali + tiny/base warning in the Generate Captions dialog.
+- `startup_error.log` when start-up fails without a console.
+
+### Fixed (found by real tests)
+- **Real transcription always failed with PyAV 19** ("unexpected keyword argument 'metadata_errors'"
+  inside faster-whisper 1.2.1). The transcriber now reads its own 16 kHz WAV and passes the samples
+  directly, and `av<19` is pinned.
+- **Caption generation could crash when started with `run.bat`**. `pythonw.exe` has no stdout/stderr,
+  and the model download progress bar wrote to them. Missing streams are now replaced, and console
+  output that cannot be encoded is escaped instead of raising.
+- **Windows: cancelling an export left FFmpeg running and the `.part.mp4` behind**. The child of an
+  FFmpeg launcher (e.g. a Chocolatey shim) survived the kill. The whole process tree is now killed
+  (`taskkill /T`), and deletes retry while Windows releases file locks.
+
 ## [0.2.0] - Unreleased
 
 ### Added (Phase 2: captions)
