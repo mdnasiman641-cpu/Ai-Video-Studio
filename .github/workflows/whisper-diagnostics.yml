@@ -1,7 +1,8 @@
 name: Whisper diagnostics
 
-# Manual only: shows how real faster-whisper models (tiny, small, medium) transcribe the
-# synthetic English/Bengali fixtures, with and without VAD and with language auto-detect.
+# Manual only. 1) How real faster-whisper models (tiny, small, medium) transcribe the synthetic
+# English/Bengali fixtures. 2) Character error rate on real human Bengali speech (Google FLEURS,
+# CC-BY-4.0, fetched at run time).
 on:
   workflow_dispatch:
 
@@ -35,3 +36,6 @@ jobs:
           done
       - name: Probe
         run: python scripts/diagnostics/whisper_probe.py .cache/whisper-diag/tiny .cache/whisper-diag/small .cache/whisper-diag/medium
+      - name: Real Bengali speech (FLEURS bn_in) character error rate
+        continue-on-error: true
+        run: python scripts/diagnostics/fleurs_bengali_probe.py 5 .cache/whisper-diag/small .cache/whisper-diag/medium
