@@ -67,17 +67,20 @@ jobs:
         run: python -m ai_video_studio.tools.check_env
 
       - name: Application smoke test (native Qt platform on Windows)
+        if: ${{ !cancelled() }}
         env:
           QT_QPA_PLATFORM: ${{ runner.os == 'Windows' && 'windows' || 'offscreen' }}
           AVS_DATA_DIR: ${{ runner.temp }}/avs-smoke
         run: python -m ai_video_studio --smoke-test
 
       - name: Application smoke test under pythonw.exe (no console, like run.bat)
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: pwsh
         env:
           QT_QPA_PLATFORM: windows
         run: |
+          # PYTHONFAULTHANDLER needs a stderr; pythonw has none and would abort before any app code runs.
+          $env:PYTHONFAULTHANDLER = $null
           $pyw = Join-Path (Split-Path (Get-Command python).Source) 'pythonw.exe'
           $env:AVS_DATA_DIR = Join-Path $env:RUNNER_TEMP 'avs-pythonw'
           $p = Start-Process -FilePath $pyw -ArgumentList '-m','ai_video_studio','--smoke-test' -WorkingDirectory $PWD -Wait -PassThru
@@ -95,6 +98,7 @@ jobs:
           Write-Host "tqdm under pythonw: OK"
 
       - name: Run test suite
+        if: ${{ !cancelled() }}
         run: python -m pytest -v -rs -s --durations=15 --junitxml=test-results.xml
 
       - name: Upload test results and logs
