@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -19,6 +18,7 @@ from ai_video_studio.captions.correction import request_corrections
 from ai_video_studio.captions.transcriber import TranscriptionOptions, transcribe_file
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import MediaError, StudioError
+from ai_video_studio.core.fs import remove_file, remove_tree
 from ai_video_studio.core.ffmpeg_commands import (
     EncoderSettings,
     ProgressParser,
@@ -97,7 +97,7 @@ def make_transcribe_handler(get_ffmpeg: Callable[[], Path], model_factory=None, 
                 cuda_devices=cuda_devices,
             )
         finally:
-            shutil.rmtree(folder, ignore_errors=True)
+            remove_tree(folder)
         return {
             "media_id": p.get("media_id"),
             "track": result.track.to_dict(),
@@ -139,12 +139,9 @@ def make_burn_in_handler(get_ffmpeg: Callable[[], Path]):
                 raise StudioError(f"Export failed: {_ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
             os.replace(partial, output)
         finally:
-            shutil.rmtree(folder, ignore_errors=True)
-            if partial.exists():
-                try:
-                    partial.unlink()
-                except OSError:
-                    pass
+            remove_tree(folder)
+            if partial.exists() and not remove_file(partial):
+                log.warning("Could not remove partial export", extra={"path": str(partial)})
         return {"media_id": p.get("media_id"), "output": str(output), "encoder": codec, "warnings": warnings}
 
     return handle
@@ -180,7 +177,7 @@ def make_frame_preview_handler(get_ffmpeg: Callable[[], Path]):
             if result.returncode != 0 or not output.is_file():
                 raise StudioError(f"Preview render failed: {_ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
         finally:
-            shutil.rmtree(folder, ignore_errors=True)
+            remove_tree(folder)
         return {"media_id": p.get("media_id"), "image": str(output), "at": p["at"]}
 
     return handle
