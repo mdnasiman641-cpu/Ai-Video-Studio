@@ -18,6 +18,29 @@ def _popen_kwargs() -> dict:
     return {}
 
 
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill a process and its children, then wait for it.
+
+    On Windows the ``ffmpeg.exe`` found on PATH can be a launcher (e.g. a Chocolatey
+    shim) that runs the real ffmpeg as a child. Killing only the launcher leaves the real
+    process running and holding the output file open, so ``taskkill /T`` is used there.
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15, **_popen_kwargs())
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 @dataclass
 class ProcessResult:
     returncode: int
@@ -56,11 +79,11 @@ def run_process(
         except subprocess.TimeoutExpired:
             waited += poll
             if cancel_event is not None and cancel_event.is_set():
-                proc.kill()
+                kill_process_tree(proc)
                 proc.communicate()
                 raise JobCancelled("Cancelled by user")
             if timeout is not None and waited >= timeout:
-                proc.kill()
+                kill_process_tree(proc)
                 proc.communicate()
                 raise subprocess.TimeoutExpired(args, timeout)
 
@@ -121,8 +144,7 @@ def run_streaming(
             on_stdout_line(line)
         proc.wait()
     except BaseException:
-        proc.kill()
-        proc.wait()
+        kill_process_tree(proc)
         raise
     finally:
         for t in readers:
