@@ -265,3 +265,19 @@ def test_transcription_result_recovered_after_restart(qtbot, window, tmp_path):
     assert window.open_project(str(path))
     assert [s.text for s in window.controller.project.media[0].captions.segments] == ["Hello everyone.",
                                                                                       "Welcome back."]
+
+
+def test_generate_dialog_warns_about_small_models_for_bengali(window):
+    from ai_video_studio.ui.caption_dialogs import GenerateCaptionsDialog
+
+    dialog = GenerateCaptionsDialog(window.controller.project.media, window.controller.project.media[0].id,
+                                    window.services.settings)
+    dialog.language.setCurrentIndex(dialog.language.findData("bn"))
+    dialog.model.setCurrentText("tiny")
+    assert "Latin" in dialog.model_note.text()
+    dialog.model.setCurrentText("small")
+    assert dialog.model_note.text() == ""
+    dialog.model.setCurrentText("base")
+    dialog.language.setCurrentIndex(dialog.language.findData("en"))
+    assert dialog.model_note.text() == ""
+    assert dialog.values()["language"] == "en"

@@ -24,6 +24,7 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       AVS_TEST_WHISPER_MODEL_DIR: ${{ github.workspace }}/.cache/whisper-tiny
+      AVS_TEST_WHISPER_BN_MODEL_DIR: ${{ github.workspace }}/.cache/whisper-small
       AVS_REQUIRE_REAL_WHISPER: "1"
       PYTHONFAULTHANDLER: "1"
     steps:
@@ -54,14 +55,17 @@ jobs:
       - name: Cache Whisper model
         uses: actions/cache@v4
         with:
-          path: .cache/whisper-tiny
-          key: whisper-faster-tiny-v1
+          path: |
+            .cache/whisper-tiny
+            .cache/whisper-small
+          key: whisper-faster-tiny-small-v1
 
-      - name: Download Whisper model (faster-whisper tiny)
+      - name: Download Whisper models (faster-whisper tiny + small)
         shell: bash
         run: |
           python -c "from huggingface_hub import snapshot_download as d; print(d('Systran/faster-whisper-tiny', local_dir='.cache/whisper-tiny'))"
-          ls -la .cache/whisper-tiny
+          python -c "from huggingface_hub import snapshot_download as d; print(d('Systran/faster-whisper-small', local_dir='.cache/whisper-small'))"
+          ls -la .cache/whisper-tiny .cache/whisper-small
 
       - name: Environment check
         run: python -m ai_video_studio.tools.check_env

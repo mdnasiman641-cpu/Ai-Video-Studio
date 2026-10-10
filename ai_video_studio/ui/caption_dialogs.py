@@ -81,6 +81,10 @@ def _transcription_block_reason(item: MediaItem) -> str | None:
     return None
 
 
+# CI with real faster-whisper: "tiny" transcribed Bengali speech as romanised Latin text.
+WEAK_BENGALI_MODELS = ("tiny", "base")
+
+
 class GenerateCaptionsDialog(QDialog):
     def __init__(self, media: list[MediaItem], current_id: str | None, settings, parent=None):
         super().__init__(parent)
@@ -115,8 +119,13 @@ class GenerateCaptionsDialog(QDialog):
         self.replace_note = QLabel("")
         self.replace_note.setWordWrap(True)
         self.replace_note.setObjectName("Error")
+        self.model_note = QLabel("")
+        self.model_note.setWordWrap(True)
+        self.model_note.setObjectName("Error")
         self._media = {m.id: m for m in media}
         self.videos.list.itemChanged.connect(self._update)
+        self.language.currentIndexChanged.connect(self._update)
+        self.model.currentTextChanged.connect(self._update)
 
         form = QFormLayout()
         form.addRow("Language:", self.language)
@@ -131,6 +140,7 @@ class GenerateCaptionsDialog(QDialog):
         layout.addWidget(self.videos, 1)
         layout.addLayout(form)
         layout.addWidget(info)
+        layout.addWidget(self.model_note)
         layout.addWidget(self.replace_note)
         layout.addWidget(self.buttons)
         self._update()
@@ -141,6 +151,10 @@ class GenerateCaptionsDialog(QDialog):
         self.replace_note.setText(
             f"Existing captions will be replaced for: {', '.join(existing)}" if existing else "")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(ids))
+        weak = self.model.isEnabled() and self.model.currentText() in WEAK_BENGALI_MODELS
+        self.model_note.setText(
+            "The tiny and base models often write Bengali in Latin letters (seen in testing). "
+            "Use 'small' or larger for Bengali." if self.language.currentData() == "bn" and weak else "")
 
     def values(self) -> dict:
         return {"media_ids": self.videos.checked_ids(), "language": self.language.currentData(),
