@@ -9,7 +9,7 @@ on:
       probe:
         description: "Which probe to run"
         type: choice
-        options: [all, synthetic, fleurs]
+        options: [all, synthetic, fleurs, fleurs-large, exit, exit-and-fleurs-large]
         default: all
 
 permissions:
@@ -17,8 +17,9 @@ permissions:
 
 jobs:
   probe:
+    if: inputs.probe != 'exit'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,14 +37,46 @@ jobs:
           path: .cache/whisper-diag
           key: whisper-diag-tiny-small-medium-v1
       - name: Download models
+        if: inputs.probe != 'fleurs-large' && inputs.probe != 'exit-and-fleurs-large'
         run: |
           for m in tiny small medium; do
             python -c "from huggingface_hub import snapshot_download as d; d('Systran/faster-whisper-$m', local_dir='.cache/whisper-diag/$m')"
           done
       - name: Probe (synthetic fixtures)
-        if: inputs.probe != 'fleurs'
+        if: inputs.probe == 'all' || inputs.probe == 'synthetic'
         run: python scripts/diagnostics/whisper_probe.py .cache/whisper-diag/tiny .cache/whisper-diag/small .cache/whisper-diag/medium
       - name: Real Bengali speech (FLEURS bn_in) character error rate
-        if: inputs.probe != 'synthetic'
+        if: inputs.probe == 'all' || inputs.probe == 'fleurs'
         continue-on-error: true
         run: python scripts/diagnostics/fleurs_bengali_probe.py 5 .cache/whisper-diag/small .cache/whisper-diag/medium
+
+      - name: Real Bengali speech (FLEURS bn_in) with large models
+        if: inputs.probe == 'all' || inputs.probe == 'fleurs-large' || inputs.probe == 'exit-and-fleurs-large'
+        continue-on-error: true
+        run: |
+          for m in large-v3-turbo large-v3; do
+            python -c "from huggingface_hub import snapshot_download as d; d('Systran/faster-whisper-$m' if '$m' != 'large-v3-turbo' else 'mobiuslabsgmbh/faster-whisper-large-v3-turbo', local_dir='.cache/whisper-large/$m')"
+          done
+          python scripts/diagnostics/fleurs_bengali_probe.py 3 .cache/whisper-large/large-v3-turbo .cache/whisper-large/large-v3
+
+  exit-abort:
+    # Native "Fatal Python error: Aborted" at process exit seen intermittently on windows-latest.
+    if: inputs.probe == 'all' || inputs.probe == 'exit' || inputs.probe == 'exit-and-fleurs-large'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install FFmpeg
+        run: choco install ffmpeg -y --no-progress
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Download Whisper tiny
+        shell: bash
+        run: python -c "from huggingface_hub import snapshot_download as d; d('Systran/faster-whisper-tiny', local_dir='.cache/whisper-tiny')"
+      - name: Probe exit behaviour per library combination
+        run: python scripts/diagnostics/exit_abort_probe.py 15 .cache/whisper-tiny
