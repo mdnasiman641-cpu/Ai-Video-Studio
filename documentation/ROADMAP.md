@@ -62,6 +62,11 @@ Still unverified:
 - **NVIDIA CUDA transcription and NVENC encoding.** No GPU is available in CI. Only the detection
   and the CPU fallback are tested.
 - **A real Windows 10/11 desktop.** CI runs on Windows Server.
+- **A native abort at process exit**, seen once on `windows-latest`. The test process printed
+  `Fatal Python error: Aborted` after all 166 tests had passed. It did not happen in the next run,
+  where the full suite and each test group in its own process all exited cleanly, and its cause was
+  not identified. As a precaution, the app now releases the Whisper model before interpreter
+  shutdown. If the app ever crashes on exit, attach the log.
 
 Next phase (not started): **Phase 3, face tracking and auto-reframe.**
 3. **Tracking/reframe**: detection on sampled frames, IoU/centroid tracker with target selection,
