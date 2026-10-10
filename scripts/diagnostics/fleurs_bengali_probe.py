@@ -39,10 +39,13 @@ def fetch_rows(count: int, folder: Path) -> list[dict]:
 
     tsv = hf_hub_download(REPO, "data/bn_in/test.tsv", repo_type="dataset")
     rows = []
+    seen_sentences = set()
     with open(tsv, encoding="utf-8") as fh:
         for line in fh:
             parts = line.rstrip("\n").split("\t")
-            if len(parts) >= 4:
+            # FLEURS has several speakers per sentence id; use one recording per sentence.
+            if len(parts) >= 4 and parts[0] not in seen_sentences:
+                seen_sentences.add(parts[0])
                 rows.append({"id": parts[0], "file": parts[1], "text": parts[3] or parts[2]})
             if len(rows) >= count:
                 break

@@ -57,7 +57,7 @@ jobs:
           for m in large-v3-turbo large-v3; do
             python -c "from huggingface_hub import snapshot_download as d; d('Systran/faster-whisper-$m' if '$m' != 'large-v3-turbo' else 'mobiuslabsgmbh/faster-whisper-large-v3-turbo', local_dir='.cache/whisper-large/$m')"
           done
-          python scripts/diagnostics/fleurs_bengali_probe.py 3 .cache/whisper-large/large-v3-turbo .cache/whisper-large/large-v3
+          python scripts/diagnostics/fleurs_bengali_probe.py 5 .cache/whisper-large/large-v3-turbo .cache/whisper-large/large-v3
 
   exit-abort:
     # Native "Fatal Python error: Aborted" at process exit seen intermittently on windows-latest.
