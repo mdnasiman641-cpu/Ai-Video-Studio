@@ -15,6 +15,19 @@ All notable changes are listed here. Versions follow semantic versioning.
 - Bengali + tiny/base warning in the Generate Captions dialog.
 - `startup_error.log` when start-up fails without a console.
 
+### Changed
+- Bengali guidance is now based on measurements of real speech: the Generate Captions dialog says
+  that tiny–medium are not usable for Bengali, and that large-v3 / large-v3-turbo need proofreading
+  (about 4 in 10 characters wrong). This replaces the earlier, incorrect "small or larger" advice.
+- README verification table separates synthetic-audio tests from real-speech results. Mocked AI
+  providers, the untested GPU path and offscreen-only UI checks are labelled as such.
+
+### Added (diagnostics)
+- Manual workflow `whisper-diagnostics.yml`:
+  - real-model transcription of the fixtures (tiny/small/medium, VAD on/off, auto-detect)
+  - real Bengali speech CER from Google FLEURS (small, medium, large-v3, large-v3-turbo)
+  - a Windows probe for the intermittent exit abort
+
 ### Fixed (found by real tests)
 - **Real transcription always failed with PyAV 19** ("unexpected keyword argument 'metadata_errors'"
   inside faster-whisper 1.2.1). The transcriber now reads its own 16 kHz WAV and passes the samples

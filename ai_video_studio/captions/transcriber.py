@@ -46,8 +46,8 @@ LANGUAGES: list[tuple[str, str]] = [
 ]
 LANGUAGE_CODES = {code for code, _ in LANGUAGES}
 
-# faster-whisper model names. Larger = more accurate and slower. For Bengali, "medium" or
-# larger is recommended; "tiny"/"base" are mainly useful for quick tests.
+# faster-whisper model names. Larger = slower. For Bengali only large-v3 / large-v3-turbo produced
+# Bengali text on real speech in testing (see documentation/ROADMAP.md).
 MODELS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 DEVICES = ("auto", "cuda", "cpu")
 

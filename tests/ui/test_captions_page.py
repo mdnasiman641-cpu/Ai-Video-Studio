@@ -267,17 +267,22 @@ def test_transcription_result_recovered_after_restart(qtbot, window, tmp_path):
                                                                                       "Welcome back."]
 
 
-def test_generate_dialog_warns_about_small_models_for_bengali(window):
-    from ai_video_studio.ui.caption_dialogs import GenerateCaptionsDialog
+def test_generate_dialog_bengali_model_notes(window):
+    from ai_video_studio.ui.caption_dialogs import (
+        BENGALI_LARGE_NOTE,
+        BENGALI_UNUSABLE_NOTE,
+        GenerateCaptionsDialog,
+    )
 
     dialog = GenerateCaptionsDialog(window.controller.project.media, window.controller.project.media[0].id,
                                     window.services.settings)
     dialog.language.setCurrentIndex(dialog.language.findData("bn"))
-    dialog.model.setCurrentText("tiny")
-    assert "Latin" in dialog.model_note.text()
-    dialog.model.setCurrentText("small")
-    assert dialog.model_note.text() == ""
-    dialog.model.setCurrentText("base")
+    for model in ("tiny", "base", "small", "medium"):
+        dialog.model.setCurrentText(model)
+        assert dialog.model_note.text() == BENGALI_UNUSABLE_NOTE, model
+    for model in ("large-v3", "large-v3-turbo"):
+        dialog.model.setCurrentText(model)
+        assert dialog.model_note.text() == BENGALI_LARGE_NOTE, model
     dialog.language.setCurrentIndex(dialog.language.findData("en"))
     assert dialog.model_note.text() == ""
     assert dialog.values()["language"] == "en"

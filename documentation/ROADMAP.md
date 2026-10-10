@@ -55,18 +55,34 @@ Bugs found by these checks and fixed: PyAV 19 broke all real transcription; `pyt
 stdout/stderr; cancelled exports on Windows left FFmpeg running (launcher shims) and left partial
 files behind.
 
+Bengali investigation (manual [Whisper diagnostics workflow](../.github/workflows/whisper-diagnostics.yml)):
+- **Synthetic espeak-ng Bengali** (the CI fixture) is not recognised as Bengali by tiny, small or
+  medium. Auto-detect says Latin, and forcing `bn` gives romanised, Kannada, Khmer or Georgian output.
+  The synthetic English clip is word-perfect on the same pipeline. The CI Bengali test therefore
+  stays an expected failure; it checks the language path, not quality.
+- **Real Bengali speech** (Google FLEURS `bn_in`, 5 sentences, CPU), character error rate:
+  - tiny / small / medium: 1.000, unusable.
+  - large-v3: 0.379. Correct script and mostly correct words, but output often stops before the
+    end of the sentence.
+  - large-v3-turbo: 0.465. Correct script and mostly correct words, but sometimes repeats text at
+    the end.
+- The Generate Captions dialog now tells users this when Bengali is selected.
+
 Still unverified:
-- **Bengali accuracy.** Synthetic espeak-ng Bengali was not written in Bengali script by tiny
-  (romanised) or small (emoji only). This needs a real Bengali recording, preferably with
-  medium or large-v3.
+- **Bengali quality on the user's own recordings**, and whether tuning (VAD, beam size,
+  `condition_on_previous_text`) reduces the truncation and repetition seen with the large models.
 - **NVIDIA CUDA transcription and NVENC encoding.** No GPU is available in CI. Only the detection
   and the CPU fallback are tested.
-- **A real Windows 10/11 desktop.** CI runs on Windows Server.
-- **A native abort at process exit**, seen once on `windows-latest`. The test process printed
-  `Fatal Python error: Aborted` after all 166 tests had passed. It did not happen in the next run,
-  where the full suite and each test group in its own process all exited cleanly, and its cause was
-  not identified. As a precaution, the app now releases the Whisper model before interpreter
-  shutdown. If the app ever crashes on exit, attach the log.
+- **Optional AI correction against the real Gemini/OpenAI APIs.** Only mocked HTTP is tested.
+- **Real (non-synthetic) English recordings.**
+- **A real Windows 10/11 desktop** and on-screen checks of the preview and overlay. CI runs
+  offscreen on Windows Server.
+- **A native abort at process exit**, seen in 2 of about 8 `windows-latest` runs. The test process
+  printed `Fatal Python error: Aborted` after all 166 tests had passed. Each test group in its own
+  process exits cleanly. A dedicated probe started 105 fresh processes on Windows covering every
+  combination the app uses (Qt Multimedia, PyAV, CTranslate2, full faster-whisper transcription),
+  and none aborted. The cause is not identified; so far it has only appeared at the end of the full
+  pytest run. As a precaution, the app releases the Whisper model before interpreter shutdown.
 
 Next phase (not started): **Phase 3, face tracking and auto-reframe.**
 3. **Tracking/reframe**: detection on sampled frames, IoU/centroid tracker with target selection,

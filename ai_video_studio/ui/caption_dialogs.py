@@ -81,8 +81,20 @@ def _transcription_block_reason(item: MediaItem) -> str | None:
     return None
 
 
-# CI with real faster-whisper: "tiny" transcribed Bengali speech as romanised Latin text.
-WEAK_BENGALI_MODELS = ("tiny", "base")
+# Measured with real faster-whisper on real Bengali speech (Google FLEURS bn_in, CPU, see
+# documentation/ROADMAP.md): tiny, small and medium produced no Bengali text (other scripts or
+# nonsense, CER 1.0); large-v3 / large-v3-turbo produced Bengali with roughly 38-47% character
+# errors. base was not tested.
+BENGALI_UNUSABLE_MODELS = ("tiny", "base", "small", "medium")
+BENGALI_UNUSABLE_NOTE = (
+    "Not usable for Bengali: in tests on real Bengali speech, tiny, small and medium produced other "
+    "scripts or nonsense instead of Bengali text (base was not tested). Use large-v3 or large-v3-turbo."
+)
+BENGALI_LARGE_NOTE = (
+    "Bengali accuracy is limited: in tests on real speech, about 4 in 10 characters were wrong, "
+    "large-v3 sometimes stopped before the end of a sentence and large-v3-turbo sometimes repeated "
+    "text. Review every caption."
+)
 
 
 class GenerateCaptionsDialog(QDialog):
@@ -111,8 +123,7 @@ class GenerateCaptionsDialog(QDialog):
         gpus = cuda_device_count()
         info = QLabel(
             (f"CUDA devices detected: {gpus}. " if gpus else "No CUDA device detected; the CPU will be used. ")
-            + "The first run downloads the selected model (tiny ≈75 MB … large-v3 ≈3 GB). "
-            "For Bengali, 'medium' or larger gives noticeably better results."
+            + "The first run downloads the selected model (tiny ≈75 MB … large-v3 ≈3 GB)."
         )
         info.setWordWrap(True)
         info.setObjectName("Muted")
@@ -151,10 +162,15 @@ class GenerateCaptionsDialog(QDialog):
         self.replace_note.setText(
             f"Existing captions will be replaced for: {', '.join(existing)}" if existing else "")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(ids))
-        weak = self.model.isEnabled() and self.model.currentText() in WEAK_BENGALI_MODELS
-        self.model_note.setText(
-            "The tiny and base models often write Bengali in Latin letters (seen in testing). "
-            "Use 'small' or larger for Bengali." if self.language.currentData() == "bn" and weak else "")
+        note = ""
+        if self.language.currentData() == "bn":
+            if not self.model.isEnabled():
+                note = BENGALI_LARGE_NOTE  # custom local model: quality unknown, same caution applies
+            elif self.model.currentText() in BENGALI_UNUSABLE_MODELS:
+                note = BENGALI_UNUSABLE_NOTE
+            else:
+                note = BENGALI_LARGE_NOTE
+        self.model_note.setText(note)
 
     def values(self) -> dict:
         return {"media_ids": self.videos.checked_ids(), "language": self.language.currentData(),

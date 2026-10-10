@@ -12,3 +12,9 @@ ffmpeg -i bn.wav -ac 1 -ar 16000 -c:a flac speech_bn.flac
 
 Robotic synthetic speech is harder to recognise than real recordings, so these files test that
 the pipeline works. They are not a measure of accuracy.
+
+Measured with real models (see the README section "Bengali: synthetic tests vs real speech"):
+- The English clip is transcribed word-perfectly by small and medium.
+- No model recognises the synthetic Bengali clip as Bengali.
+
+Bengali quality was therefore measured separately, on real human speech (Google FLEURS).
