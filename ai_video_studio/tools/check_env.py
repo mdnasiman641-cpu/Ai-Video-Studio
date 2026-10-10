@@ -35,6 +35,24 @@ def main() -> int:
             _line(False, module, str(exc))
             failures += 1
 
+    try:
+        import faster_whisper
+
+        _line(True, "faster-whisper", faster_whisper.__version__)
+        from ai_video_studio.captions.transcriber import cuda_device_count
+
+        gpus = cuda_device_count()
+        _line(None, "CUDA devices visible to CTranslate2",
+              f"{gpus}" + ("" if gpus else " (speech recognition will use the CPU)"))
+    except Exception as exc:  # noqa: BLE001
+        _line(False, "faster-whisper", str(exc))
+        failures += 1
+
+    from ai_video_studio.storage import secrets
+
+    _line(None, "Secure API-key storage", "available" if secrets.secure_store_available()
+          else "not available (use GEMINI_API_KEY / OPENAI_API_KEY environment variables)")
+
     configured = None
     try:
         from ai_video_studio.services import Services

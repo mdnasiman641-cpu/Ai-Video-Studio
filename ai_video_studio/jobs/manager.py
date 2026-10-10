@@ -153,15 +153,20 @@ class JobManager:
                 timeout=timeout,
             )
 
-    def shutdown(self, timeout: float = 5.0) -> None:
-        """Cancel running jobs and stop the worker pool. Queued jobs stay queued for next start."""
+    def shutdown(self, timeout: float = 5.0) -> bool:
+        """Cancel running jobs and stop the worker pool. Queued jobs stay queued for next start.
+
+        Returns False if some job did not stop within ``timeout`` (e.g. a model download);
+        such jobs stay RUNNING in the database and are reported as interrupted on next start.
+        """
         with self._lock:
             self._closed = True
             for ctx in self._running.values():
                 ctx.cancel_event.set()
         with self._idle:
-            self._idle.wait_for(lambda: not self._running, timeout=timeout)
+            stopped = self._idle.wait_for(lambda: not self._running, timeout=timeout)
         self._executor.shutdown(wait=False, cancel_futures=True)
+        return stopped
 
     # -- internals -----------------------------------------------------------
     def _run(self, handler: JobHandler, ctx: JobContext) -> None:

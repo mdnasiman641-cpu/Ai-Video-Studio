@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import traceback
@@ -86,8 +87,12 @@ def main(argv: list[str] | None = None) -> int:
     services.jobs.dispatch()
 
     log.info("Log file: %s", log_path)
-    try:
-        return app.exec()
-    finally:
-        services.close()
-        log.info("Shut down")
+    code = app.exec()
+    clean = services.close()
+    log.info("Shut down")
+    if not clean:
+        # A worker thread is stuck in native code (e.g. model download/decoding) and would keep
+        # the process alive after the window closed. Exit now; the job is recovered next start.
+        logging.shutdown()
+        os._exit(code)
+    return code

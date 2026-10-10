@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from ai_video_studio.captions.model import CaptionTrack
+from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.core.ffmpeg_tools import VideoMetadata
 
 VIDEO_EXTENSIONS = frozenset(
@@ -34,6 +36,12 @@ class MediaItem:
     added_at: str = field(default_factory=now_iso)
     metadata: VideoMetadata | None = None
     error: str | None = None
+    captions: CaptionTrack | None = None
+    caption_style: CaptionStyle | None = None  # None = default style
+
+    @property
+    def effective_caption_style(self) -> CaptionStyle:
+        return self.caption_style or CaptionStyle()
 
     @property
     def name(self) -> str:
@@ -57,6 +65,10 @@ class MediaItem:
             "metadata": self.metadata.to_dict() if self.metadata else None,
             "error": self.error,
         }
+        if self.captions is not None:
+            data["captions"] = self.captions.to_dict()
+        if self.caption_style is not None:
+            data["caption_style"] = self.caption_style.to_dict()
         if project_dir is not None:
             try:
                 data["relative_path"] = os.path.relpath(self.path, project_dir)
@@ -80,6 +92,8 @@ class MediaItem:
             added_at=data.get("added_at") or now_iso(),
             metadata=VideoMetadata.from_dict(meta) if meta else None,
             error=data.get("error"),
+            captions=CaptionTrack.from_dict(data["captions"]) if data.get("captions") else None,
+            caption_style=CaptionStyle.from_dict(data["caption_style"]) if data.get("caption_style") else None,
         )
 
 

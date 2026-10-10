@@ -20,8 +20,9 @@
 
 Phase 1 adds no other dependencies. Planned additions, each checked for compatibility when its phase starts:
 
-- Phase 2: `faster-whisper` (CTranslate2; CUDA 12 + cuDNN 9 needed for GPU, CPU int8 fallback).
-  Model weights download at first use to the user cache, never into the repo.
+- Phase 2 (added): `faster-whisper` 1.1–1.x (CTranslate2 4.x; CUDA 12 cuBLAS + cuDNN 9 for GPU,
+  optional `requirements-gpu.txt`; CPU int8 fallback) and `keyring` (Windows Credential Manager).
+  Model weights download at first use to the data folder, never into the repo.
 - Phase 3: `opencv-python` and `mediapipe`. **MediaPipe Python runs on the CPU on Windows; it
   does not use CUDA.** On a Ryzen 7 7700, 1080p face detection on downscaled frames should be fast
   enough, but this must be benchmarked. A CUDA alternative (e.g. an ONNX Runtime GPU face detector)
@@ -35,11 +36,9 @@ Phase 1 adds no other dependencies. Planned additions, each checked for compatib
 ## Phase plan
 
 1. **Foundation**: done (see README).
-2. **Captions**: audio extraction (FFmpeg → 16 kHz mono WAV in the temp dir), faster-whisper job
-   with word timestamps and a language option, caption model (segments with words), editor table
-   (text/start/end, add/delete/split/merge), styles and presets, SRT import/export, live style
-   preview over the video, ASS generation for burn-in. Optional AI correction is shown as a
-   reviewable diff and never applied silently.
+2. **Captions**: done (v0.2.0). Not verified in the build environment: real Whisper inference
+   (Hugging Face model download was blocked by the network policy) and anything Windows- or
+   GPU-specific (CUDA DLL loading, NVENC, Windows Credential Manager, Windows fonts).
 3. **Tracking/reframe**: detection on sampled frames, IoU/centroid tracker with target selection,
    confidence, smoothing (EMA + dead zone + max speed), loss recovery (hold, then ease to centre),
    crop-path editor with manual keyframes, export with a crop path that varies over time

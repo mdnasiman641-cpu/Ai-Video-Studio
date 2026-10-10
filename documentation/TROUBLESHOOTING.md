@@ -29,3 +29,31 @@ when reporting a problem. API keys are masked in the log.
 ## Resetting the app
 Close the app and delete `%LOCALAPPDATA%\AIVideoStudio\studio.db` (settings, recent list, job
 history). Project files are not affected.
+
+## Caption generation fails with "Could not download the Whisper model"
+The model is downloaded from huggingface.co on first use. Check the internet connection, firewall
+or proxy. To work offline, download a faster-whisper (CTranslate2) model folder, for example
+`Systran/faster-whisper-small`, and choose it under **Settings → Captions → Local model folder**.
+
+## Captions are generated on the CPU although I have an NVIDIA GPU
+The status line after generation shows the device and the reason for any fallback. GPU
+transcription needs the CUDA 12 cuBLAS and cuDNN 9 libraries: run `scripts\windows\setup.bat --gpu`
+(installs them as pip packages) and keep the NVIDIA driver up to date. `check_env.bat` shows how
+many CUDA devices CTranslate2 can see.
+
+## Bengali (or another script) looks wrong in the preview or export
+The chosen font must contain the script's glyphs. On Windows, choose a font such as
+**Nirmala UI** (built in) or **Noto Sans Bengali**. If the chosen font lacks the glyphs, Qt and
+libass each pick a fallback font on their own, and the two may differ. Use **Exact Preview** to
+see exactly what the export will look like.
+
+## Export is slow or uses the CPU
+**Settings → Export → Video encoder** set to *Automatic* uses NVENC only if a test encode
+succeeds. If the export result says NVENC is unavailable, update the NVIDIA driver and use an FFmpeg
+build with NVENC (e.g. Gyan "full"). Burning in subtitles always re-encodes the video.
+
+## AI Check is greyed out
+AI correction is optional. Choose a provider under **Settings → AI caption correction** and
+provide a key, either via the `GEMINI_API_KEY` / `OPENAI_API_KEY` environment variables or
+**Store Key** (Windows Credential Manager). Model names change over time; if the provider rejects
+the model, enter a current model name from the provider's documentation.

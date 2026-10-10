@@ -1,5 +1,6 @@
 @echo off
 REM One-time setup: creates .venv, installs dependencies and checks the environment.
+REM Options: --dev (test tools)  --gpu (CUDA libraries for GPU speech recognition)
 setlocal
 cd /d "%~dp0\..\.."
 
@@ -18,8 +19,9 @@ if not exist ".venv\Scripts\python.exe" (
 echo Installing dependencies ...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip || goto :error
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt || goto :error
-if /i "%1"=="--dev" (
-    ".venv\Scripts\python.exe" -m pip install -r requirements-dev.txt || goto :error
+for %%A in (%*) do (
+    if /i "%%A"=="--dev" ".venv\Scripts\python.exe" -m pip install -r requirements-dev.txt || goto :error
+    if /i "%%A"=="--gpu" ".venv\Scripts\python.exe" -m pip install -r requirements-gpu.txt || goto :error
 )
 
 echo.

@@ -45,6 +45,14 @@ MIGRATIONS: list[str] = [
     CREATE INDEX idx_jobs_state ON jobs(state);
     CREATE INDEX idx_jobs_created ON jobs(created_at);
     """,
+    # 2: user caption style presets (built-in presets live in code)
+    """
+    CREATE TABLE caption_presets (
+        name TEXT PRIMARY KEY,
+        style TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

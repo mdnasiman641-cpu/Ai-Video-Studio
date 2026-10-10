@@ -19,7 +19,10 @@ log = logging.getLogger(__name__)
 
 PROJECT_EXTENSION = ".avsproj"
 PROJECT_FORMAT = "ai-video-studio-project"
-PROJECT_VERSION = 1
+# Version history:
+#   1 - Phase 1: media list with metadata
+#   2 - Phase 2: per-media "captions" (CaptionTrack) and "caption_style" (optional keys)
+PROJECT_VERSION = 2
 
 
 @dataclass

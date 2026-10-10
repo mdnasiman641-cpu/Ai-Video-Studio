@@ -185,3 +185,21 @@ def test_counts_and_newest_first(db):
     assert [j.id for j in store.list(limit=1)] == [a.id]
     counts = store.counts()
     assert counts[JobState.QUEUED] == 1 and counts[JobState.CANCELLED] == 1 and counts[JobState.RUNNING] == 0
+
+
+def test_shutdown_reports_stuck_job(db):
+    manager = _manager(db)
+    release = threading.Event()
+    started = threading.Event()
+
+    def stuck(job, ctx):  # ignores cancellation, like native code that cannot be interrupted
+        started.set()
+        release.wait(5)
+        return {}
+
+    manager.register("stuck", stuck)
+    job = manager.submit("stuck", "Stuck")
+    assert started.wait(5)
+    assert manager.shutdown(timeout=0.2) is False
+    assert manager.store.get(job.id).state is JobState.RUNNING  # recovered as interrupted next start
+    release.set()

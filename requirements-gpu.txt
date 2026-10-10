@@ -1,0 +1,6 @@
+# Optional: CUDA libraries for GPU speech recognition with faster-whisper/CTranslate2 4.x
+# (CUDA 12 cuBLAS + cuDNN 9). Requires an NVIDIA GPU with a recent driver.
+# Without these the app transcribes on the CPU automatically.
+-r requirements.txt
+nvidia-cublas-cu12>=12,<13
+nvidia-cudnn-cu12>=9,<10

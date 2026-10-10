@@ -8,10 +8,22 @@ from pathlib import Path
 
 from ai_video_studio.core import paths
 from ai_video_studio.core.ffmpeg_tools import find_tool, require_tool, tool_version
+from ai_video_studio.jobs.caption_jobs import (
+    BURN_IN_JOB,
+    CORRECTION_JOB,
+    FRAME_PREVIEW_JOB,
+    TRANSCRIBE_JOB,
+    make_burn_in_handler,
+    make_correction_handler,
+    make_frame_preview_handler,
+    make_transcribe_handler,
+)
 from ai_video_studio.jobs.handlers import PROBE_JOB, make_probe_handler
 from ai_video_studio.jobs.manager import JobManager
 from ai_video_studio.jobs.store import JobStore
 from ai_video_studio.storage.database import Database
+from ai_video_studio.storage import secrets
+from ai_video_studio.storage.presets import PresetStore
 from ai_video_studio.storage.project import RecentProjects
 from ai_video_studio.storage.settings import SettingsStore
 
@@ -35,8 +47,13 @@ class Services:
         self.db = Database(db_path or paths.database_path())
         self.settings = SettingsStore(self.db)
         self.recent = RecentProjects(self.db)
+        self.presets = PresetStore(self.db)
         self.jobs = JobManager(JobStore(self.db), self.settings.get("max_concurrent_jobs"))
         self.jobs.register(PROBE_JOB, make_probe_handler(self.ffprobe_path))
+        self.jobs.register(TRANSCRIBE_JOB, make_transcribe_handler(self.ffmpeg_path))
+        self.jobs.register(BURN_IN_JOB, make_burn_in_handler(self.ffmpeg_path))
+        self.jobs.register(FRAME_PREVIEW_JOB, make_frame_preview_handler(self.ffmpeg_path))
+        self.jobs.register(CORRECTION_JOB, make_correction_handler(secrets.get_api_key))
         self.settings.subscribe(self._on_setting_changed)
 
     def ffprobe_path(self) -> Path:
@@ -44,6 +61,13 @@ class Services:
 
     def ffmpeg_path(self) -> Path:
         return require_tool("ffmpeg", self.settings.get("ffmpeg_dir"))
+
+    def ai_correction_config(self) -> tuple[str, str] | None:
+        """``(provider, model)`` when AI correction is enabled and has a key, else ``None``."""
+        provider = self.settings.get("ai_correction_provider")
+        if provider == "none" or not secrets.get_api_key(provider):
+            return None
+        return provider, self.settings.get(f"{provider}_model")
 
     def tool_status(self) -> ToolStatus:
         configured = self.settings.get("ffmpeg_dir")
@@ -64,6 +88,11 @@ class Services:
 
             set_level(value)
 
-    def close(self) -> None:
-        self.jobs.shutdown()
+    def close(self) -> bool:
+        """Returns False if a job was still running (its worker thread cannot be stopped)."""
+        stopped = self.jobs.shutdown()
+        if not stopped:
+            log.warning("A background job did not stop in time; it will be marked interrupted on next start")
+            return False
         self.db.close()
+        return True

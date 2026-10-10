@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -26,6 +25,7 @@ from ai_video_studio.core.errors import StudioError
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.services import Services, ToolStatus
 from ai_video_studio.storage.project import PROJECT_EXTENSION
+from ai_video_studio.ui.pages.captions import CaptionsPage
 from ai_video_studio.ui.pages.edit import EditPage
 from ai_video_studio.ui.pages.home import HomePage
 from ai_video_studio.ui.pages.media import MediaPage, video_file_filter
@@ -76,12 +76,14 @@ class MainWindow(QMainWindow):
         self.home_page = HomePage(services)
         self.media_page = MediaPage(self.controller)
         self.edit_page = EditPage(self.controller)
+        self.captions_page = CaptionsPage(self.controller, self.bridge)
         self.queue_page = QueuePage(services, self.bridge)
         self.settings_page = SettingsPage(services, on_tools_changed=self._on_tools_changed)
         built = {
             "Home": self.home_page,
             "Media": self.media_page,
             "Edit": self.edit_page,
+            "Captions": self.captions_page,
             "Export Queue": self.queue_page,
             "Settings": self.settings_page,
         }
@@ -153,6 +155,8 @@ class MainWindow(QMainWindow):
     def _on_nav(self, row: int) -> None:
         if self.pages.currentWidget() is self.edit_page and row != self._page_index["Edit"]:
             self.edit_page.stop_playback()
+        if self.pages.currentWidget() is self.captions_page and row != self._page_index["Captions"]:
+            self.captions_page.stop_playback()
         self.pages.setCurrentIndex(row)
         if row == self._page_index["Home"]:
             self.home_page.refresh_recent()
@@ -238,6 +242,7 @@ class MainWindow(QMainWindow):
     def close_project(self) -> None:
         if self.confirm_discard():
             self.edit_page.stop_playback()
+            self.captions_page.stop_playback()
             self.controller.close_project()
             self.navigate("Home")
 
@@ -303,4 +308,5 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.edit_page.stop_playback()
+        self.captions_page.stop_playback()
         event.accept()

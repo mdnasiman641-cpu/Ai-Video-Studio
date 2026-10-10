@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from typing import Callable
+
+from PySide6.QtCore import QRectF, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QShortcut
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -22,6 +23,62 @@ from ai_video_studio.core.media import format_duration
 
 log = logging.getLogger(__name__)
 
+# overlay(painter, video_rect_on_screen, video_frame_size)
+Overlay = Callable[[QPainter, QRectF, QSize], None]
+
+
+class VideoCanvas(QWidget):
+    """Paints decoded frames from a QVideoSink, then an optional overlay (e.g. captions).
+
+    Drawing frames ourselves (instead of QVideoWidget's native surface) lets the caption
+    preview be painted on top of the video reliably on every platform.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.sink = QVideoSink(self)
+        self.sink.videoFrameChanged.connect(self._on_frame)
+        self._image: QImage | None = None
+        self.overlay: Overlay | None = None
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setMinimumSize(320, 180)
+
+    def _on_frame(self, frame: QVideoFrame) -> None:
+        if frame.isValid():
+            image = frame.toImage()
+            if not image.isNull():
+                self._image = image
+                self.update()
+
+    def clear(self) -> None:
+        self._image = None
+        self.update()
+
+    def frame_size(self) -> QSize | None:
+        return self._image.size() if self._image is not None else None
+
+    def video_rect(self) -> QRectF | None:
+        if self._image is None or self._image.width() == 0:
+            return None
+        iw, ih = self._image.width(), self._image.height()
+        scale = min(self.width() / iw, self.height() / ih)
+        w, h = iw * scale, ih * scale
+        return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("black"))
+        rect = self.video_rect()
+        if rect is not None:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawImage(rect, self._image)
+            if self.overlay is not None:
+                try:
+                    self.overlay(painter, rect, self._image.size())
+                except Exception:  # noqa: BLE001 - a broken overlay must not break playback
+                    log.exception("Video overlay failed")
+        painter.end()
+
 
 class VideoPreview(QWidget):
     position_changed = Signal(int)  # milliseconds
@@ -34,10 +91,8 @@ class VideoPreview(QWidget):
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
-        self.video_widget = QVideoWidget(self)
-        self.video_widget.setMinimumSize(320, 180)
-        self.video_widget.setStyleSheet("background-color: black;")
-        self.player.setVideoOutput(self.video_widget)
+        self.canvas = VideoCanvas(self)
+        self.player.setVideoSink(self.canvas.sink)
 
         style = self.style()
         self.play_button = QPushButton(style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay), "")
@@ -72,7 +127,7 @@ class VideoPreview(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.video_widget, 1)
+        layout.addWidget(self.canvas, 1)
         layout.addLayout(controls)
         layout.addWidget(self.status_label)
 
@@ -104,6 +159,7 @@ class VideoPreview(QWidget):
     # -- public API ----------------------------------------------------------
     def load(self, path: str | None, fps: float | None = None) -> None:
         self.player.stop()
+        self.canvas.clear()
         if not path:
             self.player.setSource(QUrl())
             self.status_label.setText("No video loaded")
@@ -145,6 +201,16 @@ class VideoPreview(QWidget):
     def seek(self, ms: int) -> None:
         self.player.setPosition(ms)
 
+    def position_seconds(self) -> float:
+        return self.player.position() / 1000
+
+    def set_overlay(self, overlay: Overlay | None) -> None:
+        self.canvas.overlay = overlay
+        self.canvas.update()
+
+    def refresh_overlay(self) -> None:
+        self.canvas.update()
+
     # -- slots ---------------------------------------------------------------
     def _set_muted(self, muted: bool) -> None:
         self.audio.setMuted(muted)
@@ -182,9 +248,9 @@ class VideoPreview(QWidget):
     def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.MediaStatus.LoadedMedia:
             self.status_label.setText("Ready")
-            if self.player.position() == 0:
-                # Show the first frame instead of a black widget.
-                self.player.setPosition(0)
+            if self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
+                # Pausing from the stopped state decodes and shows the first frame.
+                self.player.pause()
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
             self.status_label.setText("This video cannot be previewed.")
 

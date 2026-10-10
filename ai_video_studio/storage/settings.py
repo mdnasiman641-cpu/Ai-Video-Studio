@@ -30,6 +30,10 @@ def _optional_dir(value: str) -> str | None:
     return None
 
 
+def _non_empty(value: str) -> str | None:
+    return None if value.strip() else "must not be empty"
+
+
 def _choice(*options: str) -> Callable[[Any], str | None]:
     return lambda v: None if v in options else f"must be one of {', '.join(options)}"
 
@@ -43,6 +47,22 @@ SETTINGS: dict[str, SettingSpec] = {
     "log_level": SettingSpec(str, "INFO", "Log level", _choice("DEBUG", "INFO", "WARNING", "ERROR")),
     "reopen_last_project": SettingSpec(bool, True, "Reopen last project on startup"),
     "preview_volume": SettingSpec(int, 80, "Preview volume", _int_range(0, 100)),
+    # Captions / transcription
+    "whisper_model": SettingSpec(str, "small", "Whisper model",
+                                 _choice("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")),
+    "whisper_model_dir": SettingSpec(str, "", "Local Whisper model folder", _optional_dir),
+    "transcription_device": SettingSpec(str, "auto", "Transcription device", _choice("auto", "cuda", "cpu")),
+    "transcription_language": SettingSpec(str, "auto", "Default caption language"),
+    "caption_max_chars": SettingSpec(int, 42, "Max characters per caption", _int_range(10, 120)),
+    "caption_max_seconds": SettingSpec(int, 6, "Max seconds per caption", _int_range(1, 20)),
+    # Export
+    "video_encoder": SettingSpec(str, "auto", "Video encoder", _choice("auto", "h264_nvenc", "libx264")),
+    "video_quality": SettingSpec(int, 20, "Video quality (CRF/CQ)", _int_range(10, 40)),
+    # Optional AI caption correction (off unless a provider is chosen)
+    "ai_correction_provider": SettingSpec(str, "none", "AI correction provider", _choice("none", "gemini", "openai")),
+    "gemini_model": SettingSpec(str, "gemini-2.5-flash", "Gemini model", _non_empty),
+    "openai_model": SettingSpec(str, "gpt-4.1-mini", "OpenAI model", _non_empty),
+    "ai_timeout_seconds": SettingSpec(int, 60, "AI request timeout (s)", _int_range(10, 300)),
 }
 
 

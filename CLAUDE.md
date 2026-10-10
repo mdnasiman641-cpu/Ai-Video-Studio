@@ -21,6 +21,9 @@ phases in `documentation/ROADMAP.md`. Implement one phase at a time and verify i
 - Schema changes: append a new entry to `storage/database.MIGRATIONS` and never edit old ones.
   Changing the project file format means bumping `PROJECT_VERSION` and keeping old files loadable.
 - Do not assume CUDA/NVENC. Detect capabilities and keep a CPU fallback.
+- Job payloads must snapshot everything a job needs (e.g. the generated ASS text), so queued jobs
+  survive restarts and are not affected by later edits.
+- AI suggestions are never applied without user review. Never send media to cloud providers.
 
 ## Commands
 ```bash
@@ -29,13 +32,20 @@ python -m pytest                       # all tests (GUI tests run offscreen)
 python -m ai_video_studio              # run the app
 python -m ai_video_studio.tools.check_env
 ```
-On headless Linux, set `QT_QPA_PLATFORM=offscreen`. Tests generate tiny sample videos with FFmpeg
+On headless Linux, set `QT_QPA_PLATFORM=offscreen`. Whisper and the AI providers are faked in tests
+(`tests/fakes.py`, injected transports). The real-Whisper test only runs when
+`AVS_TEST_WHISPER_MODEL_DIR` points to a local model. Tests generate tiny sample videos with FFmpeg
 at runtime, so no media is committed. Tests that need FFmpeg are skipped when it is not installed.
 
 ## Layout
-- `ai_video_studio/core/`: paths, logging, errors, subprocess, ffmpeg/ffprobe, media model
+- `ai_video_studio/core/`: paths, logging, errors, subprocess (`run_process`, `run_streaming`),
+  ffmpeg/ffprobe, FFmpeg command builders and encoder selection (`ffmpeg_commands.py`), media model
+- `ai_video_studio/captions/`: caption model and edit operations, SRT, style, ASS generation,
+  faster-whisper transcriber, AI correction (no Qt)
+- `ai_video_studio/ai/`: Gemini/OpenAI JSON clients (stdlib HTTP, injectable transport for tests)
 - `ai_video_studio/storage/`: SQLite database, settings, project files and recent projects
-- `ai_video_studio/jobs/`: job model, persistent store, manager, handlers
+- `ai_video_studio/jobs/`: job model, persistent store, manager, handlers (`caption_jobs.py` for
+  transcribe, burn-in, frame preview and AI correction)
 - `ai_video_studio/services.py`: wires storage, settings and jobs together
 - `ai_video_studio/ui/`: main window, pages, widgets, theme, project controller
 - `tests/unit`, `tests/integration` (real FFmpeg), `tests/ui` (pytest-qt, offscreen)

@@ -24,7 +24,13 @@ from ai_video_studio.ui.widgets.common import muted, page_title
 
 HISTORY_LIMIT = 500  # rows shown; older finished jobs stay in the database until cleared
 COLUMNS = ["Job", "State", "Progress", "Attempts", "Created", "Finished", "Message"]
-KIND_LABELS = {"probe_media": "Metadata"}
+KIND_LABELS = {
+    "probe_media": "Metadata",
+    "transcribe": "Captions",
+    "burn_in": "Export",
+    "caption_frame_preview": "Preview",
+    "caption_correction": "AI check",
+}
 
 
 def _short_time(iso: str | None) -> str:

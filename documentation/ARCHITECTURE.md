@@ -18,7 +18,45 @@ services.py    wires the pieces together (one instance per app run)
         ├── manager.py      dispatch, concurrency limit, pause/resume, cancel, retry
         └── handlers.py     job implementations (Phase 1: FFprobe metadata)
 core/          no Qt: paths, logging, errors, process runner, ffmpeg/ffprobe, media model
+captions/      no Qt: caption model + edits, SRT, style, ASS, transcriber, AI correction
+ai/            no Qt: Gemini/OpenAI JSON clients
 ```
+
+## Caption pipeline (Phase 2)
+
+```
+video ──ffmpeg──► 16 kHz mono WAV ──faster-whisper──► words ──segments_from_words──► CaptionTrack
+                      (temp, deleted)                                                     │
+SRT file ─────────────────────────────parse_srt──────────────────────────────────────────┤
+                                                                                          ▼
+                                                    editor (copy → edit → undo snapshot) ─┤
+                                                                                          ▼
+         CaptionStyle ──► wrap_text (same line breaks everywhere)                        │
+             │                     │                                                     │
+             ▼                     ▼                                                     ▼
+   QPainter overlay (live)    build_ass ──► captions.ass ──ffmpeg subtitles=(libass)──► MP4
+                                            (frame preview job renders 1 PNG the same way)
+```
+
+- **Sizes** are in pixels for a 1080-pixel-tall frame and scaled to the video height. The ASS file
+  uses `PlayResX/Y` = the video's display size, so libass and the overlay agree.
+- **Line breaks** are computed once by `wrap_text`. The ASS file uses `WrapStyle: 2` (no libass
+  wrapping), so preview and export break lines in the same places.
+- **Background box** is drawn as a second ASS layer (`BorderStyle 3`, invisible text) under the
+  normal outlined text, so the box and the outline can be used together.
+- **Shaping**: the overlay builds text from `QTextLayout` glyph runs, so complex scripts
+  (Bengali, Devanagari, Arabic) are shaped. libass shapes with HarfBuzz.
+- **Burn-in** runs FFmpeg with its working directory set to the job's temp folder and passes the
+  subtitle file as a bare name (`subtitles=captions.ass`). This avoids FFmpeg filter escaping of
+  Windows paths.
+- **Encoder**: `choose_video_encoder` uses NVENC only after a real 0.2 s test encode succeeds
+  (the result is cached). An export that fails on NVENC is retried with libx264.
+- **Transcription device**: CUDA (float16) is tried first when CTranslate2 sees a CUDA device or
+  when CUDA is forced. A load or decode failure falls back to CPU int8. One model is cached, and
+  transcriptions run one at a time.
+- **AI correction** sends `{id, text}` per caption in batches of 60 and asks for JSON. Answers are
+  validated: unknown ids, empty or implausibly long text, and unchanged text are dropped.
+  Suggestions are stored on the track as `pending_corrections` until the user reviews them.
 
 `core/`, `storage/` and `jobs/` never import Qt, so they can be tested without a display and
 reused by a future command-line or batch runner.
