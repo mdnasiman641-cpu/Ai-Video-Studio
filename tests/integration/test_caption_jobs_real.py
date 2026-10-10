@@ -72,10 +72,10 @@ def test_transcribe_job_extracts_audio_and_builds_track(manager, blue_clip):
     assert job.state is JobState.COMPLETED, job.error
     assert job.result["track"]["segments"][0]["text"] == "Hello there"
     assert job.result["device"] == "cpu" and job.result["language"] == "bn"
-    wav_path = model.calls[0][0]
-    assert wav_path.endswith("audio.wav")
-    import os
-    assert not os.path.exists(wav_path)  # temp audio cleaned up
+    samples = model.calls[0][0]
+    assert not isinstance(samples, str) and abs(len(samples) / 16000 - 3.0) < 0.2  # 3 s of 16 kHz audio
+    from ai_video_studio.core import paths
+    assert not (paths.temp_dir() / f"job-{job.id}").exists()  # temp audio cleaned up
 
 
 def test_transcribe_job_without_audio_fails_clearly(manager, sample_videos):

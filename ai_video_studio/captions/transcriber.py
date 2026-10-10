@@ -243,10 +243,33 @@ def transcribe_file(
     raise TranscriptionError(f"Transcription failed: {last_error}")
 
 
+def load_pcm16_wav(path: str):
+    """Read a 16 kHz mono 16-bit WAV (what the app's FFmpeg extraction produces) as float32 samples.
+
+    Passing samples instead of a file path means faster-whisper does not decode audio with
+    PyAV. faster-whisper 1.2.1 calls ``av.open(..., metadata_errors=...)``, which PyAV 19
+    removed, so path-based decoding fails with that combination (found by the real-Whisper
+    CI tests). Returns ``None`` for any other format so the caller can fall back to the path.
+    """
+    import wave
+
+    import numpy as np
+
+    try:
+        with wave.open(path, "rb") as wav:
+            if wav.getframerate() != 16000 or wav.getnchannels() != 1 or wav.getsampwidth() != 2:
+                return None
+            frames = wav.readframes(wav.getnframes())
+    except (wave.Error, EOFError, OSError):
+        return None
+    return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+
+
 def _run(model, audio_path: str, options: TranscriptionOptions, progress, check_cancelled) -> TranscriptionResult:
     language = None if options.language == "auto" else options.language
+    samples = load_pcm16_wav(audio_path)
     segments_iter, info = model.transcribe(
-        audio_path,
+        samples if samples is not None else audio_path,
         language=language,
         beam_size=options.beam_size,
         word_timestamps=True,

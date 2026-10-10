@@ -41,10 +41,23 @@ if not MODEL_AVAILABLE and os.environ.get("AVS_REQUIRE_REAL_WHISPER") == "1":
     # CI sets this so a failed model download can never turn into silently skipped tests.
     raise RuntimeError(f"AVS_REQUIRE_REAL_WHISPER=1 but no model folder at {MODEL_DIR!r}")
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [requires_ffmpeg, pytest.mark.skipif(
     not MODEL_AVAILABLE,
     reason="AVS_TEST_WHISPER_MODEL_DIR not set to a downloaded faster-whisper model (real transcription not tested)",
-)
+)]
+
+
+@pytest.fixture(scope="module")
+def wavs(tmp_path_factory):
+    """Convert the FLAC fixtures to the 16 kHz mono WAV that the app's extraction step produces."""
+    folder = tmp_path_factory.mktemp("wav")
+    out = {}
+    for lang, src in (("en", EN_AUDIO), ("bn", BN_AUDIO)):
+        dst = folder / f"{lang}.wav"
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-ac", "1", "-ar", "16000",
+                        "-c:a", "pcm_s16le", str(dst)], check=True)
+        out[lang] = str(dst)
+    return out
 
 
 @pytest.fixture(autouse=True)
@@ -67,8 +80,8 @@ def _check_timing(result, max_end=AUDIO_SECONDS):
         assert 0 <= s.start < s.end <= max_end + 0.5
 
 
-def test_english_transcription_cpu():
-    result = transcribe_file(str(EN_AUDIO), TranscriptionOptions(model_path=MODEL_DIR, language="en", device="cpu"))
+def test_english_transcription_cpu(wavs):
+    result = transcribe_file(wavs["en"], TranscriptionOptions(model_path=MODEL_DIR, language="en", device="cpu"))
     text = _text(result).lower()
     print(f"\n[real whisper/en] device={result.device} text={text!r}")
     assert result.device == "cpu" and result.language == "en"
@@ -78,8 +91,8 @@ def test_english_transcription_cpu():
     assert all(seg.words for seg in result.track.segments), "word timestamps missing"
 
 
-def test_bengali_transcription_cpu():
-    result = transcribe_file(str(BN_AUDIO), TranscriptionOptions(model_path=MODEL_DIR, language="bn", device="cpu"))
+def test_bengali_transcription_cpu(wavs):
+    result = transcribe_file(wavs["bn"], TranscriptionOptions(model_path=MODEL_DIR, language="bn", device="cpu"))
     text = _text(result)
     print(f"\n[real whisper/bn] device={result.device} text={text!r}")
     assert result.language == "bn"
@@ -90,14 +103,14 @@ def test_bengali_transcription_cpu():
     _check_timing(result)
 
 
-def test_auto_language_detects_english():
-    result = transcribe_file(str(EN_AUDIO), TranscriptionOptions(model_path=MODEL_DIR, language="auto", device="cpu"))
+def test_auto_language_detects_english(wavs):
+    result = transcribe_file(wavs["en"], TranscriptionOptions(model_path=MODEL_DIR, language="auto", device="cpu"))
     print(f"\n[real whisper/auto] detected={result.language} p={result.language_probability:.2f}")
     assert result.language == "en"
 
 
-def test_auto_device_matches_hardware():
-    result = transcribe_file(str(EN_AUDIO), TranscriptionOptions(model_path=MODEL_DIR, language="en", device="auto"))
+def test_auto_device_matches_hardware(wavs):
+    result = transcribe_file(wavs["en"], TranscriptionOptions(model_path=MODEL_DIR, language="en", device="auto"))
     gpus = cuda_device_count()
     print(f"\n[real whisper/auto-device] cuda_devices={gpus} used={result.device} warnings={result.warnings}")
     if gpus == 0:
@@ -107,10 +120,10 @@ def test_auto_device_matches_hardware():
         assert result.device == "cuda" or any("falling back" in w or "retried" in w for w in result.warnings)
 
 
-def test_forced_cuda_without_gpu_falls_back_to_cpu():
+def test_forced_cuda_without_gpu_falls_back_to_cpu(wavs):
     if cuda_device_count() > 0:
         pytest.skip("a CUDA device is present; fallback-without-GPU cannot be exercised here")
-    result = transcribe_file(str(EN_AUDIO), TranscriptionOptions(model_path=MODEL_DIR, language="en", device="cuda"))
+    result = transcribe_file(wavs["en"], TranscriptionOptions(model_path=MODEL_DIR, language="en", device="cuda"))
     print(f"\n[real whisper/forced-cuda] used={result.device} warnings={result.warnings}")
     assert result.device == "cpu"
     assert any("CPU" in w for w in result.warnings)

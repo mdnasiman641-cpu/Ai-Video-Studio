@@ -106,3 +106,44 @@ def test_no_speech_warning_and_model_cache():
     assert result.track.segments == [] and "No speech" in result.warnings[0]
     tr.transcribe_file("b.wav", tr.TranscriptionOptions(), model_factory=factory, cuda_devices=0)
     assert len(factory.loads) == 1  # model reused between jobs
+
+
+def _write_wav(path, rate=16000, channels=1, width=2, frames=1600):
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(b"\x00\x40" * frames * channels)  # 0x4000 = 16384 -> 0.5
+
+
+def test_load_pcm16_wav(tmp_path):
+    good = tmp_path / "good.wav"
+    _write_wav(good)
+    samples = tr.load_pcm16_wav(str(good))
+    assert samples.dtype.name == "float32" and len(samples) == 1600 and abs(samples[0] - 0.5) < 1e-6
+    stereo = tmp_path / "stereo.wav"
+    _write_wav(stereo, channels=2)
+    assert tr.load_pcm16_wav(str(stereo)) is None
+    other_rate = tmp_path / "44k.wav"
+    _write_wav(other_rate, rate=44100)
+    assert tr.load_pcm16_wav(str(other_rate)) is None
+    not_wav = tmp_path / "x.flac"
+    not_wav.write_bytes(b"fLaC....")
+    assert tr.load_pcm16_wav(str(not_wav)) is None
+
+
+def test_extracted_wav_is_passed_as_samples_not_path(tmp_path):
+    """The model must get decoded samples so faster-whisper never needs PyAV (av>=19 incompatibility)."""
+    wav = tmp_path / "audio.wav"
+    _write_wav(wav)
+    model = FakeWhisperModel(SEGS)
+    tr.transcribe_file(str(wav), tr.TranscriptionOptions(), model_factory=FakeFactory(model), cuda_devices=0)
+    assert not isinstance(model.calls[0][0], str)
+    other = tmp_path / "audio.flac"
+    other.write_bytes(b"x")
+    model2 = FakeWhisperModel(SEGS)
+    tr.clear_model_cache()
+    tr.transcribe_file(str(other), tr.TranscriptionOptions(), model_factory=FakeFactory(model2), cuda_devices=0)
+    assert model2.calls[0][0] == str(other)  # unknown formats still go to faster-whisper's own decoder

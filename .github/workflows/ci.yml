@@ -80,13 +80,17 @@ jobs:
         run: |
           $pyw = Join-Path (Split-Path (Get-Command python).Source) 'pythonw.exe'
           $env:AVS_DATA_DIR = Join-Path $env:RUNNER_TEMP 'avs-pythonw'
-          $p = Start-Process -FilePath $pyw -ArgumentList '-m','ai_video_studio','--smoke-test' -Wait -PassThru
-          Get-Content (Join-Path $env:AVS_DATA_DIR 'logs\ai_video_studio.log') -Tail 3
-          if ($p.ExitCode -ne 0) { throw "pythonw smoke test failed with exit code $($p.ExitCode)" }
+          $p = Start-Process -FilePath $pyw -ArgumentList '-m','ai_video_studio','--smoke-test' -WorkingDirectory $PWD -Wait -PassThru
+          Write-Host "pythonw exit code: $($p.ExitCode)"
+          $log = Join-Path $env:AVS_DATA_DIR 'logs\ai_video_studio.log'
+          $crash = Join-Path $env:AVS_DATA_DIR 'startup_error.log'
+          if (Test-Path $crash) { Get-Content $crash }
+          if (Test-Path $log) { Get-Content $log -Tail 4 }
+          if ($p.ExitCode -ne 0 -or -not (Select-String -Path $log -Pattern 'Smoke test passed' -Quiet)) { throw "pythonw smoke test failed" }
           # Progress-bar output under pythonw (what Whisper model downloads do):
           $marker = Join-Path $env:RUNNER_TEMP 'pythonw-tqdm-ok.txt'
           $code = "from ai_video_studio.app import ensure_std_streams; ensure_std_streams(); from tqdm import tqdm; list(tqdm(range(5))); open(r'$marker','w').write('ok')"
-          $p = Start-Process -FilePath $pyw -ArgumentList '-c', "`"$code`"" -Wait -PassThru
+          $p = Start-Process -FilePath $pyw -ArgumentList '-c', "`"$code`"" -WorkingDirectory $PWD -Wait -PassThru
           if (-not (Test-Path $marker)) { throw "tqdm output under pythonw crashed (exit $($p.ExitCode))" }
           Write-Host "tqdm under pythonw: OK"
 

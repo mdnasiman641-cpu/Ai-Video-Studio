@@ -3,5 +3,8 @@
 PySide6>=6.7,<6.13
 # Speech recognition (Phase 2). Pulls in ctranslate2, onnxruntime (VAD), av and tokenizers.
 faster-whisper>=1.1,<2
+# PyAV 19 removed av.open(metadata_errors=...), which faster-whisper 1.2.1 still passes.
+# The app decodes its own WAV so it does not depend on this, but keep PyAV compatible anyway.
+av>=12,<19
 # Secure API-key storage (Windows Credential Manager) for optional AI caption correction.
 keyring>=24,<26
