@@ -1,0 +1,3 @@
+# Runtime dependencies (Phase 1). Later phases add packages only when a feature needs them.
+# PySide6 6.7+ ships the FFmpeg-based Qt Multimedia backend on Windows (needed for preview).
+PySide6>=6.7,<6.13

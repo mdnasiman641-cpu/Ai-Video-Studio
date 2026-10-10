@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build output
+build/
+dist/
+*.spec.bak
+logs/
+
+# Local media, renders and caches (never commit videos or model weights)
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+*.wav
+*.mp3
+*.srt.bak
+renders/
+exports/
+temp/
+models/
+.cache/
+
+# Bundled third-party binaries (download locally, see documentation)
+bin/
+ffmpeg/
+
+# Secrets
+.env
+.env.*
+*.key
+secrets.json
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

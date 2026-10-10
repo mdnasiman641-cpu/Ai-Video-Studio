@@ -1,0 +1,41 @@
+# CLAUDE.md: notes for AI assistants working on this repo
+
+## Project
+AI Video Studio is a Windows desktop video editor (Python, PySide6, FFmpeg). Development follows the
+phases in `documentation/ROADMAP.md`. Implement one phase at a time and verify it before moving on.
+
+## Rules
+- Never add buttons that do nothing, fake progress, or simulated processing. A feature that is not
+  implemented belongs on its `PlannedPage` with no controls.
+- Never modify source videos. Write outputs and temp files elsewhere (`core/paths.py`).
+- Never commit secrets, videos, model weights, venvs or build output (see `.gitignore`). Log through
+  `logging`; `core/logging_setup.redact` masks keys and tokens.
+- Long-running work runs as a job (`jobs/`), never on the GUI thread. Handlers are plain functions
+  `(job, ctx) -> dict` registered in `services.py`. They must call `ctx.report_progress()` or
+  `ctx.check_cancelled()` regularly and run subprocesses with `core.process.run_process(...,
+  cancel_event=ctx.cancel_event)`.
+- Keep `core/`, `storage/` and `jobs/` free of Qt imports so they stay unit-testable. Qt code lives
+  in `ui/`.
+- Raise `StudioError` subclasses for expected, user-facing failures. Their messages are shown
+  to users.
+- Schema changes: append a new entry to `storage/database.MIGRATIONS` and never edit old ones.
+  Changing the project file format means bumping `PROJECT_VERSION` and keeping old files loadable.
+- Do not assume CUDA/NVENC. Detect capabilities and keep a CPU fallback.
+
+## Commands
+```bash
+pip install -r requirements-dev.txt
+python -m pytest                       # all tests (GUI tests run offscreen)
+python -m ai_video_studio              # run the app
+python -m ai_video_studio.tools.check_env
+```
+On headless Linux, set `QT_QPA_PLATFORM=offscreen`. Tests generate tiny sample videos with FFmpeg
+at runtime, so no media is committed. Tests that need FFmpeg are skipped when it is not installed.
+
+## Layout
+- `ai_video_studio/core/`: paths, logging, errors, subprocess, ffmpeg/ffprobe, media model
+- `ai_video_studio/storage/`: SQLite database, settings, project files and recent projects
+- `ai_video_studio/jobs/`: job model, persistent store, manager, handlers
+- `ai_video_studio/services.py`: wires storage, settings and jobs together
+- `ai_video_studio/ui/`: main window, pages, widgets, theme, project controller
+- `tests/unit`, `tests/integration` (real FFmpeg), `tests/ui` (pytest-qt, offscreen)

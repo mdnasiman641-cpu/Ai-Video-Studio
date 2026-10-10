@@ -1,0 +1,56 @@
+"""Pages for features scheduled in later phases.
+
+These pages intentionally contain no buttons: they state what is planned so the
+navigation is complete without presenting unimplemented features as working.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+from ai_video_studio.ui.widgets.common import Card, muted, page_title, section_title
+
+PLANNED_PAGES: dict[str, tuple[int, list[str]]] = {
+    "Captions": (2, [
+        "Speech-to-text with timestamps (Whisper-compatible, local)",
+        "Caption editing: text, timing, split/merge, add/delete",
+        "Styles and presets, SRT import/export, burn-in on export",
+    ]),
+    "Face Tracking": (3, [
+        "Face/person detection and tracking with target selection",
+        "Smoothed crop paths, dead zone, padding, manual correction",
+        "16:9 → 9:16 / 1:1 reframing applied to the real export",
+    ]),
+    "Smart Cut": (4, [
+        "Audio silence detection with threshold, minimum duration and padding",
+        "Reviewable cut proposals, manual ranges, undo/redo",
+        "Caption remapping and A/V-synchronised segment merge",
+    ]),
+    "Resize & Crop": (5, [
+        "1920x1080, 1080x1920, 1080x1080 and custom output",
+        "Fit, fill, crop, blur background, manual positioning",
+        "Frame rate, H.264/H.265, quality and audio settings",
+    ]),
+    "Bulk Processing": (6, [
+        "Per-video and shared settings, presets",
+        "Batch export with filename templates and duplicate protection",
+    ]),
+    "AI Models": (7, [
+        "Gemini and OpenAI provider configuration (keys stored outside the repo)",
+        "Primary/fallback providers, retries, rate-limit handling, usage display",
+    ]),
+}
+
+
+class PlannedPage(QWidget):
+    def __init__(self, title: str):
+        super().__init__()
+        phase, items = PLANNED_PAGES[title]
+        card = Card()
+        card.body.addWidget(section_title(f"Planned for Phase {phase} — not implemented yet"))
+        for item in items:
+            card.body.addWidget(muted(f"• {item}"))
+        layout = QVBoxLayout(self)
+        layout.addWidget(page_title(title))
+        layout.addWidget(card)
+        layout.addStretch(1)
