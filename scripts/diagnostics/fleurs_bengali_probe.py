@@ -1,7 +1,7 @@
 """Diagnostic: real human Bengali speech (Google FLEURS, bn_in test split, CC-BY-4.0).
 
-Fetches a few utterances with reference transcripts through the Hugging Face
-datasets-server API at run time (nothing is committed), transcribes them with the given
+Downloads the bn_in test transcripts and audio from the dataset repository at run time
+(nothing is committed), takes the first few utterances, transcribes them with the given
 faster-whisper models on CPU (language=bn, the app's default VAD setting) and prints the
 character error rate (CER) per utterance and overall. Not a pass/fail test.
 
@@ -10,14 +10,11 @@ character error rate (CER) per utterance and overall. Not a pass/fail test.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import tempfile
 import time
 import unicodedata
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,21 +26,39 @@ from ai_video_studio.captions.transcriber import (  # noqa: E402
     transcribe_file,
 )
 
-API = "https://datasets-server.huggingface.co/rows"
+REPO = "google/fleurs"
 
 
-def fetch_rows(count: int) -> list[dict]:
-    query = urllib.parse.urlencode({"dataset": "google/fleurs", "config": "bn_in", "split": "test",
-                                    "offset": 0, "length": count})
-    with urllib.request.urlopen(f"{API}?{query}", timeout=60) as resp:
-        data = json.load(resp)
+def fetch_rows(count: int, folder: Path) -> list[dict]:
+    """Download the bn_in test transcripts and audio archive from the dataset repository and
+    extract the first ``count`` utterances (the datasets-server rows API returns HTTP 500 for
+    this script-based dataset)."""
+    import tarfile
+
+    from huggingface_hub import hf_hub_download
+
+    tsv = hf_hub_download(REPO, "data/bn_in/test.tsv", repo_type="dataset")
     rows = []
-    for item in data["rows"]:
-        row = item["row"]
-        audio = row["audio"][0]["src"] if isinstance(row["audio"], list) else row["audio"]["src"]
-        rows.append({"id": row.get("id"), "audio": audio,
-                     "text": row.get("transcription") or row.get("raw_transcription")})
-    return rows
+    with open(tsv, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 4:
+                rows.append({"id": parts[0], "file": parts[1], "text": parts[3] or parts[2]})
+            if len(rows) >= count:
+                break
+    wanted = {r["file"]: r for r in rows}
+    archive = hf_hub_download(REPO, "data/bn_in/audio/test.tar.gz", repo_type="dataset")
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar:
+            name = Path(member.name).name
+            if name in wanted and member.isfile():
+                target = folder / name
+                with tar.extractfile(member) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                wanted[name]["audio"] = str(target)
+                if all("audio" in r for r in rows):
+                    break
+    return [r for r in rows if "audio" in r]
 
 
 def normalise(text: str) -> str:
@@ -66,18 +81,16 @@ def cer(ref: str, hyp: str) -> float:
 
 
 def main(count: int, model_dirs: list[str]) -> int:
-    try:
-        rows = fetch_rows(count)
-    except Exception as exc:  # noqa: BLE001 - diagnostic: report and stop
-        print(f"[fleurs] could not fetch FLEURS rows: {exc}")
-        return 1
     with tempfile.TemporaryDirectory() as tmp:
+        try:
+            rows = fetch_rows(count, Path(tmp))
+        except Exception as exc:  # noqa: BLE001 - diagnostic: report and stop
+            print(f"[fleurs] could not fetch FLEURS data: {exc}")
+            return 1
         wavs = []
         for n, row in enumerate(rows):
-            raw = Path(tmp) / f"{n}.audio"
-            urllib.request.urlretrieve(row["audio"], raw)
             wav = Path(tmp) / f"{n}.wav"
-            subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(raw), "-ac", "1", "-ar", "16000",
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", row["audio"], "-ac", "1", "-ar", "16000",
                             "-c:a", "pcm_s16le", str(wav)], check=True)
             wavs.append(str(wav))
         print(f"[fleurs] fetched {len(wavs)} real Bengali utterances")

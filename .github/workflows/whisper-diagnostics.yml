@@ -5,6 +5,12 @@ name: Whisper diagnostics
 # CC-BY-4.0, fetched at run time).
 on:
   workflow_dispatch:
+    inputs:
+      probe:
+        description: "Which probe to run"
+        type: choice
+        options: [all, synthetic, fleurs]
+        default: all
 
 permissions:
   contents: read
@@ -34,8 +40,10 @@ jobs:
           for m in tiny small medium; do
             python -c "from huggingface_hub import snapshot_download as d; d('Systran/faster-whisper-$m', local_dir='.cache/whisper-diag/$m')"
           done
-      - name: Probe
+      - name: Probe (synthetic fixtures)
+        if: inputs.probe != 'fleurs'
         run: python scripts/diagnostics/whisper_probe.py .cache/whisper-diag/tiny .cache/whisper-diag/small .cache/whisper-diag/medium
       - name: Real Bengali speech (FLEURS bn_in) character error rate
+        if: inputs.probe != 'synthetic'
         continue-on-error: true
         run: python scripts/diagnostics/fleurs_bengali_probe.py 5 .cache/whisper-diag/small .cache/whisper-diag/medium
