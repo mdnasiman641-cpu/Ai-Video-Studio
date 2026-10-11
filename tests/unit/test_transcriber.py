@@ -56,14 +56,18 @@ def test_auto_language_passes_none():
     assert model.calls[0][1]["language"] is None and result.language == "bn"
 
 
-def test_cuda_load_failure_falls_back_to_cpu():
+def test_cuda_load_failure_falls_back_to_cpu(monkeypatch):
+    # The CUDA libraries are present; loading the model on the GPU fails anyway.
+    monkeypatch.setattr(tr, "cuda_libraries_ok", lambda: True)
     factory = FakeFactory(FakeWhisperModel(SEGS), fail_devices={"cuda"})
     result = tr.transcribe_file("a.wav", tr.TranscriptionOptions(), model_factory=factory, cuda_devices=1)
     assert [d for _, d, _ in factory.loads] == ["cuda", "cpu"]
     assert result.device == "cpu" and "falling back to CPU" in result.warnings[0]
 
 
-def test_cuda_runtime_failure_retries_on_cpu():
+def test_cuda_runtime_failure_retries_on_cpu(monkeypatch):
+    # The CUDA libraries are present; the failure only happens while transcribing.
+    monkeypatch.setattr(tr, "cuda_libraries_ok", lambda: True)
     class Factory(FakeFactory):
         def __call__(self, name, device, compute_type, root):
             self.loads.append(device)
