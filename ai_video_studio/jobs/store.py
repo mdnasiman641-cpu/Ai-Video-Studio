@@ -67,13 +67,14 @@ class JobStore:
                 raise InvalidStateTransition(f"Job cannot go from {current.value} to {target.value}")
             updates = {"state": target.value}
             if target is JobState.RUNNING:
-                updates |= {"started_at": now_iso(), "finished_at": None, "progress": 0.0}
+                updates |= {"started_at": now_iso(), "finished_at": None, "progress": 0.0, "stage": None}
             elif target.is_finished:
                 updates["finished_at"] = now_iso()
                 if target is JobState.COMPLETED:
                     updates["progress"] = 1.0
-            elif target is JobState.QUEUED:
-                updates |= {"error": None, "result": None, "progress": 0.0, "started_at": None, "finished_at": None}
+            elif target is JobState.QUEUED and current is not JobState.HELD:
+                updates |= {"error": None, "result": None, "progress": 0.0, "started_at": None, "finished_at": None,
+                            "stage": None}
             for key, value in fields.items():
                 updates[key] = json.dumps(value) if key == "result" and value is not None else value
             assignments = ", ".join(f"{k} = ?" for k in updates)
@@ -88,6 +89,10 @@ class JobStore:
             "UPDATE jobs SET progress = ? WHERE id = ? AND state = ?",
             (progress, job_id, JobState.RUNNING.value),
         )
+
+    def set_stage(self, job_id: str, stage: str | None) -> None:
+        self._db.execute("UPDATE jobs SET stage = ? WHERE id = ? AND state = ?",
+                         (stage, job_id, JobState.RUNNING.value))
 
     def recover_interrupted(self) -> list[Job]:
         """Mark jobs left RUNNING by a crash or forced exit as FAILED so they can be retried."""

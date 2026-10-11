@@ -65,6 +65,9 @@ SETTINGS: dict[str, SettingSpec] = {
     # Background jobs that may run at once. Kept low by default: one 1080p NVENC/x264
     # render already uses a large share of CPU/GPU.
     "max_concurrent_jobs": SettingSpec(int, 2, "Maximum concurrent jobs", _int_range(1, 8)),
+    # Video renders (exports) that may run at once, within the limit above. One 1080p render
+    # already keeps the CPU or the NVENC encoder busy; more mainly costs memory.
+    "max_concurrent_renders": SettingSpec(int, 1, "Maximum concurrent renders", _int_range(1, 4)),
     "log_level": SettingSpec(str, "INFO", "Log level", _choice("DEBUG", "INFO", "WARNING", "ERROR")),
     "reopen_last_project": SettingSpec(bool, True, "Reopen last project on startup"),
     "preview_volume": SettingSpec(int, 80, "Preview volume", _int_range(0, 100)),

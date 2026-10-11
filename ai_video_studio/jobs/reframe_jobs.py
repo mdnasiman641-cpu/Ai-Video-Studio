@@ -51,55 +51,68 @@ def payload_features(p: dict) -> set[str]:
     return features
 
 
+def run_tracking_analysis(p: dict, ffmpeg: Path, ctx: JobContext, factory: DetectorFactory | None = None, vad=None,
+                          progress_range: tuple[float, float] = (0.0, 1.0)) -> TrackingAnalysis:
+    """Analyse faces/people (and speech) in ``p["path"]``; used by the analysis and batch render jobs."""
+    factory = factory or default_detector_factory
+    low, high = progress_range
+
+    def report(fraction: float) -> None:
+        ctx.report_progress(low + (high - low) * fraction)
+
+    source = Path(p["path"])
+    if not source.is_file():
+        raise MediaError(f"Source video not found: {source}")
+    features = payload_features(p)
+    want_speech = "speech" in features
+    video_share = 0.8 if want_speech else 1.0
+    stat = source.stat()
+    width, height = int(p["width"]), int(p["height"])
+    duration = float(p.get("duration") or 0)
+    sample_fps = float(p.get("sample_fps", 5))
+    face_threshold = float(p.get("face_threshold", 0.6))
+    detector_warnings: list[str] = []
+    if features & {"faces", "persons", "mouth"}:
+        detectors = factory(p)
+        detector_warnings = list(detectors.warnings)
+        ctx.check_cancelled()
+        analysis = analyze_video(
+            ffmpeg, str(source), width, height, duration, sample_fps, detectors, detectors.description,
+            progress=lambda f: report(f * video_share), cancel_event=ctx.cancel_event,
+            features=features, face_threshold=face_threshold,
+        )
+    else:
+        analysis = TrackingAnalysis(width=width, height=height, duration=duration, sample_fps=sample_fps,
+                                    frames_analyzed=0, detector="", features=[], face_threshold=face_threshold)
+    if want_speech:
+        folder = job_temp_dir(ctx.job)
+        try:
+            wav = folder / "speech.wav"
+            extract_speech_audio(ffmpeg, str(source), str(wav), cancel_event=ctx.cancel_event)
+            report(video_share + 0.05)
+            kwargs = {"vad": vad, "detector": "test VAD"} if vad is not None else {}
+            analysis.speech = analyse_speech(
+                str(wav), progress=lambda f: report(video_share + 0.05 + 0.15 * f * 0.999),
+                check_cancelled=ctx.check_cancelled, **kwargs)
+        finally:
+            remove_tree(folder)
+        analysis.features = sorted(set(analysis.features) | {"speech"})
+        if not any(v >= 0.5 for v in analysis.speech.prob):
+            analysis.notes.append("No speech was detected in the audio.")
+    analysis.warnings = detector_warnings + analysis.warnings
+    analysis.source_size, analysis.source_mtime = stat.st_size, round(stat.st_mtime, 3)
+    return analysis
+
+
 def make_reframe_analyze_handler(get_ffmpeg: Callable[[], Path], detector_factory: DetectorFactory | None = None,
                                  vad=None):
     """``vad`` replaces the Silero voice-activity model (tests)."""
-    factory = detector_factory or default_detector_factory
 
     def handle(job: Job, ctx: JobContext) -> dict:
         p = job.payload
-        source = Path(p["path"])
-        if not source.is_file():
-            raise MediaError(f"Source video not found: {source}")
-        ffmpeg = get_ffmpeg()
-        features = payload_features(p)
-        want_speech = "speech" in features
-        video_share = 0.8 if want_speech else 1.0
-        stat = source.stat()
-        width, height = int(p["width"]), int(p["height"])
-        duration = float(p.get("duration") or 0)
-        sample_fps = float(p.get("sample_fps", 5))
-        face_threshold = float(p.get("face_threshold", 0.6))
-        detector_warnings: list[str] = []
-        if features & {"faces", "persons", "mouth"}:
-            detectors = factory(p)
-            detector_warnings = list(detectors.warnings)
-            ctx.check_cancelled()
-            analysis = analyze_video(
-                ffmpeg, str(source), width, height, duration, sample_fps, detectors, detectors.description,
-                progress=lambda f: ctx.report_progress(f * video_share), cancel_event=ctx.cancel_event,
-                features=features, face_threshold=face_threshold,
-            )
-        else:
-            analysis = TrackingAnalysis(width=width, height=height, duration=duration, sample_fps=sample_fps,
-                                        frames_analyzed=0, detector="", features=[], face_threshold=face_threshold)
-        if want_speech:
-            folder = job_temp_dir(job)
-            try:
-                wav = folder / "speech.wav"
-                extract_speech_audio(ffmpeg, str(source), str(wav), cancel_event=ctx.cancel_event)
-                ctx.report_progress(video_share + 0.05)
-                kwargs = {"vad": vad, "detector": "test VAD"} if vad is not None else {}
-                analysis.speech = analyse_speech(
-                    str(wav), progress=lambda f: ctx.report_progress(video_share + 0.05 + 0.15 * f * 0.999),
-                    check_cancelled=ctx.check_cancelled, **kwargs)
-            finally:
-                remove_tree(folder)
-            analysis.features = sorted(set(analysis.features) | {"speech"})
-            if not any(v >= 0.5 for v in analysis.speech.prob):
-                analysis.notes.append("No speech was detected in the audio.")
-        analysis.warnings = detector_warnings + analysis.warnings
-        analysis.source_size, analysis.source_mtime = stat.st_size, round(stat.st_mtime, 3)
+        if not Path(p["path"]).is_file():
+            raise MediaError(f"Source video not found: {p['path']}")
+        analysis = run_tracking_analysis(p, get_ffmpeg(), ctx, detector_factory, vad)
         return {"media_id": p.get("media_id"), "analysis": analysis.to_dict(),
                 "tracks": len(analysis.tracks), "features": analysis.features, "warnings": analysis.warnings}
 

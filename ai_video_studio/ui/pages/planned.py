@@ -11,10 +11,6 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from ai_video_studio.ui.widgets.common import Card, muted, page_title, section_title
 
 PLANNED_PAGES: dict[str, tuple[int, list[str]]] = {
-    "Bulk Processing": (6, [
-        "Per-video and shared settings, presets",
-        "Batch export with filename templates and duplicate protection",
-    ]),
     "AI Models": (7, [
         "Gemini and OpenAI provider configuration (keys stored outside the repo)",
         "Primary/fallback providers, retries, rate-limit handling, usage display",

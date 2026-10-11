@@ -9,6 +9,7 @@ from enum import Enum
 
 class JobState(str, Enum):
     QUEUED = "queued"
+    HELD = "held"            # queued but paused (e.g. a paused batch); not started until released
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -20,7 +21,8 @@ class JobState(str, Enum):
 
 
 ALLOWED_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
-    JobState.QUEUED: frozenset({JobState.RUNNING, JobState.CANCELLED}),
+    JobState.QUEUED: frozenset({JobState.RUNNING, JobState.CANCELLED, JobState.HELD}),
+    JobState.HELD: frozenset({JobState.QUEUED, JobState.CANCELLED}),
     JobState.RUNNING: frozenset({JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}),
     JobState.FAILED: frozenset({JobState.QUEUED}),      # retry
     JobState.CANCELLED: frozenset({JobState.QUEUED}),   # retry
@@ -47,6 +49,7 @@ class Job:
     created_at: str = ""
     started_at: str | None = None
     finished_at: str | None = None
+    stage: str | None = None   # what a running job is doing (e.g. "analyzing", "rendering")
 
     @classmethod
     def from_row(cls, row) -> "Job":
@@ -64,4 +67,5 @@ class Job:
             created_at=row["created_at"],
             started_at=row["started_at"],
             finished_at=row["finished_at"],
+            stage=row["stage"] if "stage" in row.keys() else None,
         )

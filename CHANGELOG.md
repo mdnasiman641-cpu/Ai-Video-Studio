@@ -53,6 +53,32 @@ Phases 4 to 7: Smart Cut, Resize & Crop, Bulk Processing and the AI provider man
 - `render_frame_preview` job, and `layout`/`reframe` stages for `render_video`. The Auto Reframe
   crop also works together with cuts.
 
+### Added — Phase 6: Bulk Processing
+- **Bulk Processing page**, replacing the placeholder:
+  - Add Videos, Add Folder, drag and drop, Remove Selected and Clear List;
+  - shared settings with preset management (apply, save as, update, rename, delete);
+  - per-video settings (Customize Selected, Use Shared Settings);
+  - output folder, file name template, and the existing-file policy (rename, skip, replace).
+- **Running a batch:**
+  - Start, Pause, Resume, Cancel Selected and Retry Failed;
+  - per-video status (Ready, Waiting, Analyzing, Rendering, Completed, Failed, Cancelled,
+    Skipped) with progress and notes, plus overall progress.
+- **Batch operations:** Resize & Crop, or Auto Reframe (the tracking analysis runs inside the
+  export job). Captions come from the project or a `.srt` file with the same name.
+- **Presets:** Vertical Reels 1080x1920, YouTube 1920x1080, Square 1080x1080, Vertical Reels
+  with captions, and Vertical Auto Reframe 1080x1920. User presets are stored in the user
+  database.
+- **Safe output names:**
+  - templates, Windows-invalid characters and reserved names handled;
+  - duplicate detection inside the batch and against queued jobs;
+  - source videos are never used as outputs.
+- **Job system:**
+  - `held` job state (pause individual jobs);
+  - job stages;
+  - "Max concurrent renders" setting (default 1) that limits heavy exports separately, so light
+    jobs keep running.
+- Database migration 3 (`jobs.stage`, `render_presets`, `batches`).
+
 ### Changed
 - Project format version 5 (adds the optional `smart_cut` and `resize` entries per video).
   Older projects open unchanged.

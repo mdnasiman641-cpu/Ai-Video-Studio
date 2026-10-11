@@ -53,6 +53,22 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # 3: render progress stage, export presets (Bulk Processing) and saved batches
+    """
+    ALTER TABLE jobs ADD COLUMN stage TEXT;
+    CREATE TABLE render_presets (
+        name TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE batches (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

@@ -29,6 +29,10 @@ from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir
 from ai_video_studio.jobs.encode import encode_with_fallback, ffmpeg_error, partial_path
 from ai_video_studio.jobs.manager import JobContext
 from ai_video_studio.jobs.models import Job
+from ai_video_studio.captions.style import CaptionStyle
+from ai_video_studio.jobs.reframe_jobs import run_tracking_analysis
+from ai_video_studio.reframe.framing import caption_band_from_style, compute_crop_path, resolve_output_size
+from ai_video_studio.reframe.model import ReframeSettings
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.render.pipeline import (
     audio_plan,
@@ -87,7 +91,30 @@ def make_smartcut_analyze_handler(get_ffmpeg: Callable[[], Path]):
     return handle
 
 
-def make_render_handler(get_ffmpeg: Callable[[], Path]):
+def reframe_stage_for(p: dict, ctx: JobContext, ffmpeg: Path, detector_factory=None, vad=None) -> tuple[dict, list[str]]:
+    """Analyse the video and build the Auto Reframe stage (batch items with the Auto Reframe operation)."""
+    auto = p["reframe_auto"]
+    settings = ReframeSettings.from_dict(auto["settings"])
+    settings.validate()
+    ctx.set_stage("analyzing")
+    analysis = None
+    if settings.tracks_subjects:
+        analysis = run_tracking_analysis(auto["analysis"] | {"path": p["path"]}, ffmpeg, ctx, detector_factory, vad,
+                                         progress_range=(0.0, 0.5))
+    band = caption_band_from_style(CaptionStyle.from_dict(auto["caption_style"])) if auto.get("caption_style") else None
+    width, height = int(auto["analysis"]["width"]), int(auto["analysis"]["height"])
+    path = compute_crop_path(analysis, settings, width, height, float(p.get("duration") or 0), caption_band=band)
+    out_w, out_h = resolve_output_size(settings, width, height)
+    stage = {"type": "reframe", "src_w": path.src_w, "src_h": path.src_h, "crop_w": path.crop_w,
+             "crop_h": path.crop_h, "keyframes": path.keyframes(), "out_w": out_w, "out_h": out_h,
+             "fps": p.get("fps"), "duration": p.get("duration")}
+    notes = list(path.warnings) + (analysis.warnings if analysis else [])
+    if analysis is not None and not analysis.tracks:
+        notes.append("No face or person was found; the fallback framing was used.")
+    return stage, notes
+
+
+def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, vad=None):
     def handle(job: Job, ctx: JobContext) -> dict:
         p = job.payload
         source, output = Path(p["path"]), Path(p["output"])
@@ -112,6 +139,13 @@ def make_render_handler(get_ffmpeg: Callable[[], Path]):
         has_audio = bool(p.get("has_audio", True))
         mode, notes = audio_plan(settings, has_audio, p.get("audio_codec"), bool(ranges))
         notes += settings.notes(fps)
+        progress_range = (0.0, 1.0)
+        stage_payload = p.get("stage")
+        if p.get("reframe_auto") and not stage_payload:
+            stage_payload, reframe_notes = reframe_stage_for(p, ctx, get_ffmpeg(), detector_factory, vad)
+            notes += reframe_notes
+            progress_range = (0.5, 1.0)
+        ctx.set_stage("rendering")
         key = output_key(output)
         with _writing_lock:
             if key in _writing:
@@ -120,7 +154,7 @@ def make_render_handler(get_ffmpeg: Callable[[], Path]):
         folder = job_temp_dir(job)
         try:
             output.parent.mkdir(parents=True, exist_ok=True)
-            stage = stage_from_payload(p.get("stage"), folder, ranges)
+            stage = stage_from_payload(stage_payload, folder, ranges)
             subtitle_file = None
             if p.get("ass"):
                 subtitle_file = SUBTITLE_FILE
@@ -137,7 +171,7 @@ def make_render_handler(get_ffmpeg: Callable[[], Path]):
 
             codec, warnings = encode_with_fallback(
                 get_ffmpeg(), build, settings.encoder, settings.crf_value, out_duration, output, folder, ctx,
-                family=settings.codec, bitrate_kbps=settings.target_bitrate)
+                family=settings.codec, bitrate_kbps=settings.target_bitrate, progress_range=progress_range)
         finally:
             remove_tree(folder)
             with _writing_lock:

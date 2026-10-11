@@ -104,7 +104,7 @@ class QueuePage(QWidget):
         self._update_buttons()
 
     def cancel_selected(self) -> None:
-        self._apply(self.services.jobs.cancel, {JobState.QUEUED, JobState.RUNNING})
+        self._apply(self.services.jobs.cancel, {JobState.QUEUED, JobState.RUNNING, JobState.HELD})
 
     def retry_selected(self) -> None:
         self._apply(self.services.jobs.retry, {JobState.FAILED, JobState.CANCELLED})
@@ -175,7 +175,7 @@ class QueuePage(QWidget):
         kind = KIND_LABELS.get(job.kind, job.kind)
         values = [
             f"[{kind}] {job.title}",
-            job.state.value.capitalize(),
+            job.state.value.capitalize() + (f" ({job.stage})" if job.stage and job.state is JobState.RUNNING else ""),
             None,
             str(job.attempts),
             _short_time(job.created_at),
@@ -200,7 +200,7 @@ class QueuePage(QWidget):
     def _update_buttons(self) -> None:
         jobs = self.selected_jobs()
         states = {j.state for j in jobs}
-        self.cancel_button.setEnabled(bool(states & {JobState.QUEUED, JobState.RUNNING}))
+        self.cancel_button.setEnabled(bool(states & {JobState.QUEUED, JobState.RUNNING, JobState.HELD}))
         self.retry_button.setEnabled(bool(states & {JobState.FAILED, JobState.CANCELLED}))
         self.open_button.setEnabled(any(j.state is JobState.COMPLETED and (j.result or {}).get("output") for j in jobs))
         self.pause_button.setText("Resume Queue" if self.services.jobs.paused else "Pause Queue")
@@ -209,6 +209,7 @@ class QueuePage(QWidget):
         paused = " (paused)" if self.services.jobs.paused else ""
         self.summary.setText(
             f"{counts[JobState.RUNNING]} running · {counts[JobState.QUEUED]} queued{paused} · "
+            f"{counts[JobState.HELD]} held · "
             f"{counts[JobState.COMPLETED]} completed · {counts[JobState.FAILED]} failed · "
             f"{counts[JobState.CANCELLED]} cancelled"
         )

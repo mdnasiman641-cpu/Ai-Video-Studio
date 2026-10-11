@@ -39,7 +39,8 @@ Phase 1 adds no other dependencies. Planned additions, each checked for compatib
 3. **Tracking/reframe**: done (v0.3.0). See "Phase 3" below.
 4. **Smart Cut**: done (v0.7.0). See "Phase 4" below.
 5. **Resize & Crop**: done (v0.7.0). See "Phase 5" below.
-6. to 9.: see the sections below and "Remaining phases".
+6. **Bulk Processing**: done (v0.7.0). See "Phase 6" below.
+7. to 9.: see the sections below and "Remaining phases".
 
 ## Phase 2 verification (v0.2.1, GitHub Actions `windows-latest` + `ubuntu-latest`)
 
@@ -304,6 +305,54 @@ NVENC on the RTX 4070.
 - GUI: live layout, validation, canvas painting, export and project reopen.
 
 **Not verified:** how the canvas preview looks on a real screen, and NVENC.
+
+## Phase 6: Bulk Processing (v0.7.0)
+
+**Design**
+- **Videos and settings:**
+  - add videos and folders (also by drag and drop); duplicates and non-videos are rejected with
+    a reason; metadata is read with probe jobs;
+  - shared settings (a preset), or a complete per-video override;
+  - operations: Resize & Crop (Fit, Fill, Blur, Custom) or Auto Reframe. Auto Reframe runs the
+    tracking analysis inside the export job with the Tracking defaults; Manual mode is excluded
+    because it needs a choice per video;
+  - captions come from the open project (same file) or a `.srt` next to the video, and are
+    burned in at the output size.
+- **Presets:**
+  - built-in: Vertical Reels 1080x1920, YouTube 1920x1080, Square 1080x1080, Vertical Reels
+    with captions, and Vertical Auto Reframe;
+  - user presets are stored in the user database (`render_presets`): create, update, rename,
+    delete. Built-ins are read-only, and updates never touch user presets.
+- **File names:**
+  - templates use `{original_name}`, `{preset}`, `{resolution}`, `{width}`, `{height}`,
+    `{codec}`, `{date}` and `{index}`;
+  - names are made Windows-safe (invalid characters, reserved names, trailing dots, length);
+  - existing files are renamed (default), skipped or replaced. Source videos, names used twice
+    in a batch, and files another queued job writes are never used.
+- **Running:**
+  - each video becomes one `render_video` job: per-video and overall progress, cancel and retry;
+  - **Pause Batch** puts unstarted jobs into a new `held` state (the running render finishes);
+    **Resume** releases them;
+  - a separate limit for heavy renders ("Max concurrent renders", default 1); light jobs are not
+    blocked behind waiting renders;
+  - job stages ("analyzing", "rendering") are shown as Analyzing and Rendering.
+- **Crash recovery:**
+  - the batch list is saved in the database (`batches`);
+  - interrupted jobs are marked failed and can be retried;
+  - completed outputs are kept, and `.part` files mean a crash never leaves a broken output
+    under the final name.
+- Database migration 3 adds `jobs.stage`, `render_presets` and `batches`.
+
+**Verified (Linux, real FFmpeg):**
+- a batch with a Resize item and an Auto Reframe item (colour-threshold detector), with stage
+  reporting;
+- heavy jobs run one at a time while light jobs continue;
+- held jobs are not started until released;
+- naming and conflict rules, preset persistence, migration from database version 2;
+- GUI: add, duplicates, overrides, start, pause, cancel, resume, retry, keeping an existing
+  file, and restoring the batch in a new page.
+
+**Not verified:** long batches on the user's PC, and NVENC concurrency limits on GeForce cards.
 
 ## Remaining phases
 

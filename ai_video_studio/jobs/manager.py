@@ -31,6 +31,11 @@ class JobContext:
         self.check_cancelled()
         self._manager._progress(self.job.id, fraction)
 
+    def set_stage(self, stage: str) -> None:
+        """Tell the UI what the job is doing now (e.g. "analyzing" before "rendering")."""
+        self.check_cancelled()
+        self._manager._stage(self.job.id, stage)
+
     def check_cancelled(self) -> None:
         if self.cancel_event.is_set():
             raise JobCancelled("Cancelled by user")
@@ -41,9 +46,11 @@ class JobHandler(Protocol):
 
 
 class JobManager:
-    def __init__(self, store: JobStore, max_concurrent: int = 2):
+    def __init__(self, store: JobStore, max_concurrent: int = 2, max_heavy: int = 1):
         self.store = store
         self._handlers: dict[str, JobHandler] = {}
+        self._heavy_kinds: set[str] = set()
+        self._max_heavy = max(1, int(max_heavy))
         self._listeners: list[Callable[[Job], None]] = []
         self._running: dict[str, JobContext] = {}
         self._lock = threading.RLock()
@@ -54,8 +61,13 @@ class JobManager:
         self._idle = threading.Condition(self._lock)
 
     # -- configuration -------------------------------------------------------
-    def register(self, kind: str, handler: JobHandler) -> None:
+    def register(self, kind: str, handler: JobHandler, heavy: bool = False) -> None:
+        """``heavy`` jobs (video renders) are limited separately by ``max_heavy``."""
         self._handlers[kind] = handler
+        if heavy:
+            self._heavy_kinds.add(kind)
+        else:
+            self._heavy_kinds.discard(kind)
 
     def add_listener(self, listener: Callable[[Job], None]) -> None:
         self._listeners.append(listener)
@@ -74,6 +86,18 @@ class JobManager:
         with self._lock:
             self._max_concurrent = min(max(1, int(value)), MAX_WORKER_THREADS)
         self.dispatch()
+
+    @property
+    def max_heavy(self) -> int:
+        return self._max_heavy
+
+    def set_max_heavy(self, value: int) -> None:
+        with self._lock:
+            self._max_heavy = min(max(1, int(value)), MAX_WORKER_THREADS)
+        self.dispatch()
+
+    def is_heavy(self, kind: str) -> bool:
+        return kind in self._heavy_kinds
 
     @property
     def paused(self) -> bool:
@@ -115,10 +139,24 @@ class JobManager:
                 ctx.cancel_event.set()  # the worker moves it to CANCELLED when the handler stops
                 return self.store.get(job_id)
             job = self.store.get(job_id)
-            if job.state is not JobState.QUEUED:
+            if job.state not in (JobState.QUEUED, JobState.HELD):
                 raise InvalidStateTransition(f"A {job.state.value} job cannot be cancelled")
             job = self.store.transition(job_id, JobState.CANCELLED, error="Cancelled by user")
         self._notify(job)
+        return job
+
+    def hold(self, job_id: str) -> Job:
+        """Keep a queued job from starting (pause it individually). Running jobs are not affected."""
+        with self._lock:
+            job = self.store.transition(job_id, JobState.HELD)
+        self._notify(job)
+        return job
+
+    def release(self, job_id: str) -> Job:
+        with self._lock:
+            job = self.store.transition(job_id, JobState.QUEUED)
+        self._notify(job)
+        self.dispatch()
         return job
 
     def retry(self, job_id: str) -> Job:
@@ -139,7 +177,17 @@ class JobManager:
             free = self._max_concurrent - len(self._running)
             if free <= 0:
                 return
-            for job in self.store.next_queued(free):
+            heavy_free = self._max_heavy - sum(1 for c in self._running.values() if c.job.kind in self._heavy_kinds)
+            started = 0
+            # Look further than the free slots: a waiting heavy job must not block light ones behind it.
+            for job in self.store.next_queued(free + 50):
+                if started >= free:
+                    break
+                if job.kind in self._heavy_kinds:
+                    if heavy_free <= 0:
+                        continue
+                    heavy_free -= 1
+                started += 1
                 handler = self._handlers.get(job.kind)
                 job = self.store.transition(job.id, JobState.RUNNING)
                 if handler is None:
@@ -198,6 +246,10 @@ class JobManager:
         self.dispatch()
         with self._idle:
             self._idle.notify_all()
+
+    def _stage(self, job_id: str, stage: str) -> None:
+        self.store.set_stage(job_id, stage)
+        self._notify(self.store.get(job_id))
 
     def _progress(self, job_id: str, fraction: float) -> None:
         self.store.set_progress(job_id, fraction)

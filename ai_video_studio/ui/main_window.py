@@ -25,6 +25,7 @@ from ai_video_studio.core.errors import StudioError
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.services import Services, ToolStatus
 from ai_video_studio.storage.project import PROJECT_EXTENSION
+from ai_video_studio.ui.pages.bulk import BulkPage
 from ai_video_studio.ui.pages.captions import CaptionsPage
 from ai_video_studio.ui.pages.edit import EditPage
 from ai_video_studio.ui.pages.home import HomePage
@@ -85,6 +86,7 @@ class MainWindow(QMainWindow):
         self.reframe_page = ReframePage(self.controller, self.bridge)
         self.smart_cut_page = SmartCutPage(self.controller, self.bridge)
         self.resize_page = ResizePage(self.controller, self.bridge)
+        self.bulk_page = BulkPage(self.controller, self.bridge)
         self.queue_page = QueuePage(services, self.bridge)
         self.settings_page = SettingsPage(services, on_tools_changed=self._on_tools_changed)
         built = {
@@ -95,6 +97,7 @@ class MainWindow(QMainWindow):
             "Auto Reframe": self.reframe_page,
             "Smart Cut": self.smart_cut_page,
             "Resize & Crop": self.resize_page,
+            "Bulk Processing": self.bulk_page,
             "Export Queue": self.queue_page,
             "Settings": self.settings_page,
         }
@@ -274,7 +277,9 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event):  # noqa: N802
         paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
         projects = [p for p in paths if p.lower().endswith(PROJECT_EXTENSION)]
-        if len(projects) == 1 and len(paths) == 1:
+        if self.pages.currentWidget() is self.bulk_page and paths and not projects:
+            self.bulk_page.add_paths(paths)  # videos dropped on Bulk Processing go into the batch
+        elif len(projects) == 1 and len(paths) == 1:
             self.open_project(projects[0])
         elif paths:
             self.media_page.import_paths(paths)

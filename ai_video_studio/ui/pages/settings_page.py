@@ -184,6 +184,10 @@ class SettingsPage(QWidget):
         self.max_jobs = QSpinBox()
         self.max_jobs.setRange(1, 8)
         self.max_jobs.setToolTip("How many background jobs may run at the same time.")
+        self.max_renders = QSpinBox()
+        self.max_renders.setRange(1, 4)
+        self.max_renders.setToolTip("How many video exports may render at the same time (within the job limit). "
+                                    "1 is recommended: one 1080p render already uses the encoder fully.")
         self.log_level = QComboBox()
         self.log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.reopen_last = QCheckBox("Reopen the last project on startup")
@@ -196,6 +200,7 @@ class SettingsPage(QWidget):
         form = QFormLayout()
         form.addRow("Projects folder:", projects_row)
         form.addRow("Max concurrent jobs:", self.max_jobs)
+        form.addRow("Max concurrent renders:", self.max_renders)
         form.addRow("Preview volume:", self.preview_volume)
         form.addRow("Log level:", self.log_level)
         form.addRow("", self.reopen_last)
@@ -374,6 +379,7 @@ class SettingsPage(QWidget):
             "ffmpeg_dir": self.ffmpeg_dir.text(),
             "projects_dir": self.projects_dir.text(),
             "max_concurrent_jobs": self.max_jobs.value(),
+            "max_concurrent_renders": self.max_renders.value(),
             "log_level": self.log_level.currentText(),
             "reopen_last_project": self.reopen_last.isChecked(),
             "preview_volume": self.preview_volume.value(),
@@ -403,6 +409,7 @@ class SettingsPage(QWidget):
         self.ffmpeg_dir.setText(s.get("ffmpeg_dir"))
         self.projects_dir.setText(s.get("projects_dir"))
         self.max_jobs.setValue(s.get("max_concurrent_jobs"))
+        self.max_renders.setValue(s.get("max_concurrent_renders"))
         self.log_level.setCurrentText(s.get("log_level"))
         self.reopen_last.setChecked(s.get("reopen_last_project"))
         self.preview_volume.setValue(s.get("preview_volume"))

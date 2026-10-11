@@ -41,6 +41,7 @@ from ai_video_studio.jobs.render_jobs import (
     make_smartcut_analyze_handler,
 )
 from ai_video_studio.jobs.store import JobStore
+from ai_video_studio.render.batch import BatchStore, RenderPresetStore
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.storage.database import Database
 from ai_video_studio.storage import secrets
@@ -69,18 +70,21 @@ class Services:
         self.settings = SettingsStore(self.db)
         self.recent = RecentProjects(self.db)
         self.presets = PresetStore(self.db)
-        self.jobs = JobManager(JobStore(self.db), self.settings.get("max_concurrent_jobs"))
+        self.render_presets = RenderPresetStore(self.db)
+        self.batches = BatchStore(self.db)
+        self.jobs = JobManager(JobStore(self.db), self.settings.get("max_concurrent_jobs"),
+                               self.settings.get("max_concurrent_renders"))
         self.jobs.register(PROBE_JOB, make_probe_handler(self.ffprobe_path))
         self.jobs.register(TRANSCRIBE_JOB, make_transcribe_handler(self.ffmpeg_path))
-        self.jobs.register(BURN_IN_JOB, make_burn_in_handler(self.ffmpeg_path))
+        self.jobs.register(BURN_IN_JOB, make_burn_in_handler(self.ffmpeg_path), heavy=True)
         self.jobs.register(FRAME_PREVIEW_JOB, make_frame_preview_handler(self.ffmpeg_path))
         self.jobs.register(CORRECTION_JOB, make_correction_handler(secrets.get_api_key))
         self.jobs.register(MODEL_DOWNLOAD_JOB, make_model_download_handler())
         self.jobs.register(REFRAME_ANALYZE_JOB, make_reframe_analyze_handler(self.ffmpeg_path))
-        self.jobs.register(REFRAME_EXPORT_JOB, make_reframe_export_handler(self.ffmpeg_path))
+        self.jobs.register(REFRAME_EXPORT_JOB, make_reframe_export_handler(self.ffmpeg_path), heavy=True)
         self.jobs.register(REFRAME_PREVIEW_JOB, make_reframe_preview_handler(self.ffmpeg_path))
         self.jobs.register(SMARTCUT_ANALYZE_JOB, make_smartcut_analyze_handler(self.ffmpeg_path))
-        self.jobs.register(RENDER_JOB, make_render_handler(self.ffmpeg_path))
+        self.jobs.register(RENDER_JOB, make_render_handler(self.ffmpeg_path), heavy=True)
         self.jobs.register(RENDER_FRAME_JOB, make_render_frame_handler(self.ffmpeg_path))
         self.settings.subscribe(self._on_setting_changed)
 
@@ -128,6 +132,8 @@ class Services:
     def _on_setting_changed(self, key: str, value) -> None:
         if key == "max_concurrent_jobs":
             self.jobs.set_max_concurrent(value)
+        elif key == "max_concurrent_renders":
+            self.jobs.set_max_heavy(value)
         elif key == "log_level":
             from ai_video_studio.core.logging_setup import set_level
 
