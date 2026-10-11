@@ -133,3 +133,27 @@ AI correction is optional. Choose a provider under **Settings → AI caption cor
 provide a key, either via the `GEMINI_API_KEY` / `OPENAI_API_KEY` environment variables or
 **Store Key** (Windows Credential Manager). Model names change over time; if the provider rejects
 the model, enter a current model name from the provider's documentation.
+
+## Smart Cut finds no silence, or wants to remove speech
+Silence means "quieter than the threshold" (peak level). With background music or room noise
+nothing may be quiet enough: click **Suggest Threshold** or raise the threshold (for example to
+−30 dB). If quiet speech is proposed for removal, lower it (for example to −45 dB) or mark those
+segments **Keep**. Nothing is cut until you click **Apply Cuts**, and every change can be undone.
+
+## An export says the file already exists or is being written
+The source video is never overwritten. An existing file is only replaced when you confirm it, and
+two exports can never write the same file at once. Choose another name, or wait for the other
+export in the Export Queue. A file ending in `.part.mp4` is an unfinished export (for example after
+a crash); it can be deleted.
+
+## Batch videos stay "Waiting"
+By default only one video renders at a time (Settings → Max concurrent renders). Videos show
+"Waiting (paused)" after **Pause Batch**; click **Resume Batch**. If the whole queue is paused, the
+Export Queue page shows "Resume Queue".
+
+## AI Check or Suggest Title is greyed out, or an AI request fails
+Open **AI Models**: a provider must be enabled, offer the task (capabilities) and have a key (the
+"API key" column says Missing otherwise). Use **Test Connection** (checks the key; no prompt) and
+**Test Model** (a tiny prompt). Error kinds: "rejected the API key" means a wrong key; "rate limit"
+means wait or add a fallback provider; "rejected the request" means the provider refused this
+request (it is then not sent to other providers). The usage history shows every attempt.

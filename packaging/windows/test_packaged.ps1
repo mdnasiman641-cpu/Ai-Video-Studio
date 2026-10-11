@@ -4,7 +4,7 @@ and runnable on your own PC (that is how GPU/NVENC detection on your hardware ge
 
   powershell -ExecutionPolicy Bypass -File packaging\windows\test_packaged.ps1 `
       -AppDir dist\AI-Video-Studio -Assets build\test-assets -WhisperModel tiny `
-      -Zip dist\AI-Video-Studio-0.3.2-portable-win64.zip -Installer dist\AI-Video-Studio-0.3.2-setup-win64.exe
+      -Zip dist\AI-Video-Studio-0.7.0-portable-win64.zip -Installer dist\AI-Video-Studio-0.7.0-setup-win64.exe
 
 Every step runs with a PATH that contains only Windows itself, so Python, pip and any FFmpeg
 installed on the machine are invisible to the program.
@@ -117,7 +117,9 @@ Step "Functional self-test in the packaged EXE (run 1)" {
     $code = Run-Exe $Console ($selfArgs + @($report) + $extra) $Data 1800
     $must = @("FFmpeg and FFprobe discovery", "video metadata (probe job)", "Qt Multimedia playback",
               "captions: SRT and burn-in export", "GPU / CUDA / NVENC detection", "face detection (bundled YuNet)",
-              "auto reframe analysis and export", "project save and reopen", "temporary files cleaned up")
+              "auto reframe analysis and export", "project save and reopen", "temporary files cleaned up",
+              "smart cut: silence detection and cut export", "resize & crop: blur background export and exact frame",
+              "bulk processing: presets, safe names, render limit", "AI provider manager (stand-in provider, no network)")
     if ($Assets) { $must += "speech activity (Silero VAD)" }
     if ($WhisperModel) { $must += "Whisper transcription (device auto, CPU fallback)" }
     $r = Check-Report $report $must

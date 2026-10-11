@@ -157,3 +157,55 @@ time, level, logger, message and context fields. Values whose keys look like sec
 - `tools/self_test.py` (`--self-test`) runs the real pipeline inside the installed program and
   writes a JSON report. The Windows build workflow and `packaging/windows/test_packaged.ps1`
   require its checks to pass.
+
+## Edited exports (Phases 4–6)
+
+- `render/output.py`: `OutputSettings`, covering codec (H.264/H.265), encoder preference
+  (auto/GPU/CPU), quality preset or CRF, target bitrate, frame rate and audio mode.
+  `core/ffmpeg_commands.choose_video_encoder` uses NVENC only after a 1-frame test encode, per
+  encoder.
+- `render/pipeline.py` builds one `-filter_complex` graph:
+  - `split`/`trim`/`setpts` and `asplit`/`atrim`/`asetpts` for each kept range, then `concat`;
+  - a video stage on the joined timeline;
+  - `fps`, then `subtitles` on the final canvas;
+  - cut points snapped to the frame grid;
+  - graphs longer than 6000 characters go to `-filter_complex_script` (Windows command-line
+    limit).
+- `render/stages.py` provides three video stages:
+  - `layout` (Resize & Crop);
+  - `reframe` (moving crop via `sendcmd`, with keyframes mapped from the source timeline to the
+    edited timeline);
+  - `scale` (previews).
+- `render/layout.py`: `compute_layout` maps a source rectangle to a canvas rectangle, in even
+  integers. It is the single geometry used by the canvas preview and `layout_filter`.
+- `jobs/render_jobs.py` contains the export jobs:
+  - `render_video` (heavy): `.part` output, never the source, existing files replaced only when
+    the payload says so, and an in-process registry so two jobs never write one file. Batch
+    Auto Reframe items run `reframe_jobs.run_tracking_analysis` first (job stage "analyzing").
+  - `render_frame_preview`: one frame through the same graph.
+  - `smartcut_analyze`: `astats` levels.
+- `smartcut/`: `levels.py` parses `ametadata` output and stores levels compactly in the
+  project. `model.py` holds detection, the segment partition, edits, undo/redo and the applied
+  keep ranges.
+- `render/batch.py`: `RenderPreset` (built-in and user presets in `render_presets`), `Batch`
+  (saved in `batches`) and `build_payload`. `render/naming.py` handles templates, Windows-safe
+  names and `plan_outputs` (conflict rules).
+- `jobs/manager.py`:
+  - heavy job kinds (renders) have their own limit (`max_concurrent_renders`, default 1), and the
+    dispatcher skips waiting heavy jobs so light ones still start;
+  - the `held` state pauses individual queued jobs (batch pause);
+  - `JobContext.set_stage` reports what a job is doing.
+
+## AI providers (Phase 7)
+
+- `ai/profiles.py`: `ProviderProfile` (no secrets) and `ProviderStore` (table `ai_providers`, in
+  priority order). The first start imports the earlier AI settings.
+- `storage/secrets.profile_key`: the profile's environment variable first, then the credential
+  store (account = profile id).
+- `ai/client.py`: Gemini `generateContent`, OpenAI or compatible `chat/completions`, `models`
+  listing for connection tests, usage parsing and key scrubbing.
+- `ai/router.py`: the capability-aware plan, bounded retries with backoff, fallback rules,
+  cancellation, the local rate limiter and usage figures. `ai/usage.py` holds the request log
+  (`ai_requests`, no content).
+- Jobs: `caption_correction` (payload snapshot of the profiles; old single-provider payloads still
+  run), `ai_test`, `ai_titles`. Keys are looked up when a job runs and are never put in a payload.

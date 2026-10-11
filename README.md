@@ -2,10 +2,13 @@
 
 A Windows desktop video editor (Python + PySide6 + FFmpeg) built for 1080p
 short-form work: captions, face-tracked reframing, silence removal, resizing and
-batch export. It is being built in phases. **Phases 1 (foundation), 2 (captions)
-and 3 (face tracking and auto reframe) are done, and the app can be built as a Windows
-program (installer, portable ZIP) that needs no Python.** Later features are listed in the
-app as "planned" and are not presented as working.
+batch export. It is being built in phases. **Phases 1 to 7 are done:**
+- foundation, captions, face tracking and auto reframe;
+- Smart Cut (silence removal), Resize & Crop, Bulk Processing;
+- the AI provider manager.
+
+**The app is also built as a Windows program** (installer, portable ZIP) that needs no Python.
+Phases 8 (hardware optimisation) and 9 (release) have not started.
 
 ## Status
 
@@ -15,12 +18,12 @@ app as "planned" and are not presented as working.
 | 1 | Foundation: UI shell, import, metadata, preview, projects, SQLite, jobs, settings, logging | **Done** |
 | 2 | Caption generation, editing, styling, SRT, burn-in, optional AI correction | **Done**: implemented and tested; see [Verification status](#verification-status) for what is and is not verified (Bengali quality, GPU, real AI providers) |
 | 3 | Face/person tracking and AI auto reframe, with six tracking modes including active-speaker (v0.3.1) | **Done**: implemented and tested with real FFmpeg, real OpenCV detection and the real speech detector on generated test clips; GPU/NVENC, your own footage and real conversations not yet verified (see [Verification status](#verification-status)) |
-| 4 | Silence removal and manual cutting | Planned |
-| 5 | Resize and visual editing | Planned |
-| 6 | Bulk editing and batch export | Planned |
-| 7 | Gemini / OpenAI provider manager | Planned |
+| 4 | Smart Cut: silence detection, reviewable cuts, caption remapping, edited export (v0.7.0) | **Done**: tested with real FFmpeg (A/V sync after cuts, captions, cancel, failures) on generated clips; your own recordings and NVENC not yet verified |
+| 5 | Resize & Crop: presets, Fit/Fill/Crop/Blur/Custom/Auto Reframe, live and exact preview (v0.7.0) | **Done**: exported pixels checked against the layout for every background type; not yet viewed on a real screen |
+| 6 | Bulk Processing: batches, presets, per-video settings, safe names, pause/resume, render limit (v0.7.0) | **Done**: real batch exports including an Auto Reframe item; long batches on your PC not yet run |
+| 7 | AI provider manager: Gemini/OpenAI/OpenAI-compatible profiles, secure keys, fallback, usage (v0.7.0) | **Done**: tested with **mocked** providers only; real API calls not tested (no keys in CI, no paid calls) |
 | 8 | Hardware optimisation (NVENC, monitoring) | Planned |
-| 9 | Windows build and release (PyInstaller) | **Packaging done early (v0.3.2)**: EXE folder, installer and portable ZIP are built and the packaged program is tested on GitHub's Windows Server runner (see [Windows program](#windows-program-installer-and-portable-zip)); not yet tried on your PC. Release signing and later-phase features still to come |
+| 9 | Windows build and release (PyInstaller) | **Packaging done early (v0.3.2, updated for v0.7.0)**: EXE folder, installer and portable ZIP are built and the packaged program, including Smart Cut, Resize, Bulk and AI routing self-test checks, is tested on GitHub's Windows Server runner (see [Windows program](#windows-program-installer-and-portable-zip)); not yet tried on your PC. Code signing still to come |
 
 ### What works now (Phase 1)
 
@@ -244,6 +247,150 @@ will defeat it.
 - Caption sizes follow the caption style and scale with the output height, as for any export. For
   vertical output you may want a smaller font or fewer characters per line (Captions → Style).
 
+### What works now (Phase 4: Smart Cut)
+
+- **Analyze Audio** measures the audio levels once (FFmpeg, 25 ms steps, all channels) as a
+  background job with progress and cancel. Silence detection then updates instantly when you
+  change:
+  - the threshold (default −35 dB), minimum silence (0.6 s), and padding before (0.15 s) and
+    after (0.25 s) speech;
+  - minimum kept sound, and an optional merge gap.
+
+  **Suggest Threshold** estimates the background and speech levels. Warnings appear when nothing
+  is below the threshold (background music or noise) or when almost everything is (quiet
+  dialogue).
+- **Review before cutting:**
+  - a timeline shows levels, kept parts (green), removed parts (red), kept silences (blue), the
+    threshold and the playhead;
+  - in the segment table you keep or remove any segment, edit boundaries (the neighbour
+    adjusts), and select all or none;
+  - Undo/Redo covers every change, including re-detection.
+  - **Preview Segment** plays a segment, and **Play edited result** skips the removed parts
+    during playback.
+- **Apply Cuts** stores the result in the project. Nothing is cut before that, and the source
+  video is never changed. The original, proposed and exported durations are shown.
+- **Export Video** goes through the export queue:
+  - frame-accurate cuts (`trim`/`concat` with cut points snapped to frames, so audio and video
+    stay in sync);
+  - H.264 or H.265, CPU or NVENC (tested before use, with automatic CPU fallback), quality or
+    bitrate, frame rate, and AAC audio;
+  - optional caption burn-in; status with Cancel, Retry and Open Output Folder.
+  - **Export Preview** renders a fast 360p version, and **Export SRT** writes the captions on the
+    edited timeline.
+- **Captions follow the cuts** at export:
+  - captions inside removed parts are left out, and the page tells you how many;
+  - captions crossing a cut are trimmed, and later ones shift, with no negative times or new
+    overlaps;
+  - the caption track itself is not changed, so manual edits are never lost.
+
+### What works now (Phase 5: Resize & Crop)
+
+- **Sizes:** Original, 1920×1080, 1080×1920, 1080×1080, 1080×1350, 720×1280, 1280×720, or a custom
+  size (even numbers, as H.264/H.265 require).
+- **Modes:**
+  - **Fit** (padding colour) and **Blur background** (the whole video over a blurred copy);
+  - **Fill** (crop the excess, with horizontal/vertical position);
+  - **Crop** (choose a region, optionally locked to the output aspect);
+  - **Custom** position and size;
+  - **Auto Reframe**, which uses the video's Auto Reframe analysis for 16:9, 9:16, 1:1 and 4:5
+    outputs.
+- **Preview:**
+  - the source view outlines the part that is used;
+  - the output canvas preview draws the same rectangles the export uses, with safe areas,
+    vertical-app overlay zones and captions at the output size;
+  - info shows output size, aspect ratio and scale factor, and warns when the video is enlarged;
+  - **Exact Frame Preview** renders the frame through the real export filter.
+- Settings are saved per video. Exports can include Smart Cut cuts and burned-in captions, with
+  the same export dialog, queue and protections as Smart Cut.
+
+### What works now (Phase 6: Bulk Processing)
+
+- **Adding videos:** Add Videos, Add Folder or drag and drop; duplicates and non-video files are
+  refused with a reason. Video information is read in the background.
+- **Settings:**
+  - shared settings, or **Customize Selected** for per-video settings;
+  - operation **Resize & Crop** or **Auto Reframe** (the face/person analysis runs inside each
+    export, using Settings → Tracking);
+  - captions come from the open project or a `.srt` file with the same name.
+- **Presets:**
+  - built-in: Vertical Reels 1080x1920, YouTube 1920x1080, Square 1080x1080, Vertical Reels with
+    captions, Vertical Auto Reframe;
+  - your own presets can be saved, updated, renamed and deleted. They are kept in your data
+    folder and never touched by updates.
+- **Output names** come from templates such as `{original_name}_vertical` or
+  `{original_name}_{resolution}`:
+  - Windows-invalid characters and reserved names are fixed;
+  - existing files are renamed, skipped or replaced, as you choose;
+  - a source video, a name used twice in the batch, or a file another queued export writes is
+    never used.
+- **Running a batch:**
+  - Start, Pause (unstarted videos wait; the one rendering finishes), Resume, Cancel Selected
+    and Retry Failed;
+  - per-video status (Ready, Waiting, Analyzing, Rendering, Completed, Failed, Cancelled,
+    Skipped) with progress and notes, plus overall progress;
+  - every video is a normal job in the Export Queue.
+- **Render limit:** by default only one render runs at a time (Settings → Max concurrent
+  renders), while light jobs such as metadata reading continue.
+- **After a crash:** the batch list is restored, completed files are kept, and interrupted
+  exports show as failed and can be retried. Exports write to a `.part` file first, so no broken
+  file is ever left under the final name.
+
+### What works now (Phase 7: AI Models)
+
+- **Providers:** add Google Gemini, OpenAI or OpenAI-compatible (custom or local) providers, each
+  with:
+  - display name, base URL, model and enabled flag;
+  - capabilities, timeout and retries;
+  - an optional rate limit, optional prices, and an optional key environment variable.
+- **Managing them:** reorder them (the first suitable one is the primary, the others are
+  fallbacks), Set as Primary, Test Connection (no prompt sent) and Test Model (a tiny test
+  prompt, after you confirm).
+- **API keys** are stored in the Windows Credential Manager or read from an environment variable,
+  and are never shown again, saved in files or the database, or written to logs. Keys stored by
+  earlier versions keep working.
+- **Routing:**
+  - a task only goes to enabled providers that offer that capability and have a key;
+  - temporary errors are retried with backoff, then the next provider is tried;
+  - authentication errors are not retried, and a request a provider rejects as invalid is not
+    sent elsewhere;
+  - each provider is tried at most once per request.
+  - Audio and video understanding are shown but cannot be enabled: **the app never uploads media
+    to cloud AI providers.**
+- **Usage:** per-provider totals and recent requests. Tokens are marked as reported by the
+  provider or estimated. Costs appear only if you entered prices, and only as estimates. Prompts
+  and answers are not stored.
+- **Used by:**
+  - Captions → **AI Check** (caption correction, every suggestion reviewed before it is applied);
+  - Captions → **Suggest Title** (title, description and hashtags to copy).
+  - Before anything is sent, you confirm, and the dialog names every provider that may receive
+    the caption text.
+- Without any provider configured, everything except these two optional AI buttons works as
+  before.
+
+### Known limitations (Phases 4–7)
+
+- **Smart Cut:**
+  - silence is decided by peak level only. Background music or room noise above the threshold
+    is not silence; use a higher threshold, or keep the proposed silences you want;
+  - "Play edited result" skips removed parts during playback and may let a few tens of
+    milliseconds through; Export Preview shows the exact result;
+  - with cuts, only the first audio track is kept;
+  - for variable-frame-rate videos, cut points are snapped to the average frame rate.
+- **Resize & Crop:**
+  - the on-screen blurred background is an approximation (Exact Frame Preview shows the real
+    one);
+  - Auto Reframe mode needs an analysis from the Auto Reframe page and a 16:9, 9:16, 1:1 or 4:5
+    output.
+- **Bulk Processing:**
+  - pausing does not stop the video that is already rendering (cancel it to stop it);
+  - Manual Subject Tracking is not available for batches, and Smart Cut cuts are not applied in
+    batches.
+- **AI:**
+  - only text tasks exist;
+  - the Gemini/OpenAI clients were tested against mocked responses only;
+  - a request can only be interrupted between attempts (an in-flight HTTP request ends when it
+    times out).
+
 ## Verification status
 
 Automated checks run on every push in GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
@@ -266,9 +413,17 @@ GitHub's runners have **no NVIDIA GPU**, and nothing has been tested on a Window
 | **Real Whisper, Bengali, synthetic voice** | CI test with tiny + small | **Expected failure (xfail)**: the espeak-ng Bengali voice is not recognised as Bengali by any model. See below |
 | **Real Whisper, Bengali, real human speech** | Manual diagnostics, Google FLEURS `bn_in`, 5 sentences, CPU | tiny/small/medium: **unusable** (CER 1.000). large-v3: **CER 0.379**, large-v3-turbo: **CER 0.465**. Draft quality only |
 | Large models in the normal app flow | large-v3 / large-v3-turbo through the transcriber (diagnostics) | Ran on CPU; **GPU not tested**, and these models are not part of the regular CI |
-| Optional AI correction (Gemini / OpenAI) | Request/response handling with **mocked** HTTP | **Not tested against the real APIs** (no API keys in CI) |
+| Optional AI correction and title suggestions (Gemini / OpenAI / custom) | Request/response handling with **mocked** HTTP | **Not tested against the real APIs** (no API keys in CI) |
 | NVIDIA CUDA transcription, NVENC encoding | Detection logic + CPU fallback only | **Not verified** (no GPU available); NVENC is listed in FFmpeg but the test encode correctly fails on the runners |
-| Cut sync (`remap_to_cuts`) | Unit tests | Passed; no cutting UI until Phase 4 |
+| Cut sync (`remap_to_cuts`) | Unit tests: removed, shifted and clipped captions, no negative times or new overlaps, edited text kept | Passed |
+| **Smart Cut** analysis and detection | Real FFmpeg `astats` on a generated tone/silence clip; unit tests for parsing (incl. `-inf`, late audio), padding, short clips, silent and no-silence audio, merging, boundaries, undo/redo | Passed on Windows and Linux |
+| **Smart Cut A/V sync** | Real export of a clip where tones and white frames start together; every onset compared after three cuts | Passed: audio and video onsets within 45 ms (about one frame) |
+| Smart Cut export protection | Cancel mid-export (no partial file), FFmpeg failure, existing output, the source as output, two jobs writing one file, video without audio, H.265 | Passed |
+| **Resize & Crop** geometry | 149 unit cases (every preset × mode × landscape/portrait/odd source sizes) | Passed |
+| Resize & Crop export = preview | Real export: pixels at the computed rectangles (Fit padding, Fill position, Blur, Custom); exact-frame preview vs exported frame; captions in the padding; with cuts; moving reframe crop with cuts | Passed |
+| **Bulk Processing** | Real batch (resize item + Auto Reframe item with a stand-in detector), naming/conflicts, presets, held jobs, render limit (one heavy job at a time while light jobs run), interrupted jobs, migration | Passed |
+| Smart Cut, Resize, Bulk and AI pages | GUI tests (offscreen) | Passed; **not checked by eye on a real screen** |
+| **AI provider manager** | Mocked Gemini/OpenAI/custom responses: request shapes, JSON mode, usage, timeouts, retries, 429, 401, 404, 400, invalid JSON, cancellation, missing keys, unsupported capabilities, key redaction, usage log without content | Passed. **Real APIs not called** |
 | **Phase 3 crop maths** (all presets, bounds, smoothing, dead zone, speed limit, loss/hold, subject changes, reappearance, caption-safe area) | Unit tests on synthetic tracks | Passed |
 | **Tracking modes** (each mode, fallbacks, reanalysis, settings persistence, upscale limit, caption band from style, preview = export crop at every frame) | Unit tests with **synthetic** tracks, mouth series and speech data; GUI tests | Passed locally (Linux); CI result in the commit's run |
 | Active-speaker scenarios (one speaks / one listens, speaker change, silent foreground person crossing, off-screen narration, silence and music, overlapping speech, occlusion) | Unit tests on **synthetic** data with known ground truth | Passed locally |
@@ -334,7 +489,7 @@ for both the installer and the ZIP.
 
 1. Download the setup EXE (from a GitHub release, or the `ai-video-studio-windows` artifact of the
    *Windows build* workflow run) and check it against `SHA256SUMS.txt` if you like:
-   `certutil -hashfile AI-Video-Studio-0.3.2-setup-win64.exe SHA256`.
+   `certutil -hashfile AI-Video-Studio-0.7.0-setup-win64.exe SHA256`.
 2. Run it. The installer is not code-signed, so Windows SmartScreen may say "Windows protected your
    PC": click **More info → Run anyway**.
 3. By default it installs **for the current user only** in `%LOCALAPPDATA%\Programs\AI Video Studio`
@@ -432,7 +587,7 @@ Then test the result as CI does:
 ```bat
 powershell -ExecutionPolicy Bypass -File packaging\windows\test_packaged.ps1 -AppDir dist\AI-Video-Studio
 ```
-Add `-Zip dist\AI-Video-Studio-0.3.2-portable-win64.zip -Installer dist\AI-Video-Studio-0.3.2-setup-win64.exe`
+Add `-Zip dist\AI-Video-Studio-0.7.0-portable-win64.zip -Installer dist\AI-Video-Studio-0.7.0-setup-win64.exe`
 to also test the ZIP, install, upgrade and uninstall (the installer test installs for the current user
 and uninstalls again), and `-WhisperModel tiny` to download a model and transcribe.
 
@@ -450,6 +605,7 @@ is used.
 | GUI start-up with the native Windows platform (`--smoke-test`) | Passed |
 | Whisper model download through the app's downloader (tiny, from Hugging Face, checksums) | Passed |
 | Self-test inside the EXE: bundled FFmpeg/FFprobe found, video import (probe job), Qt Multimedia playback, SRT export and subtitle burn-in, CUDA/NVENC detection, bundled YuNet face detection, auto reframe analysis + export, Silero VAD, Whisper transcription (CPU fallback), project save/reopen, temp-file cleanup | 16 of 16 passed |
+| v0.7.0 additions to the self-test: Smart Cut silence detection + cut export, Resize & Crop blur export + exact frame, Bulk presets/safe names/render limit, AI routing with a stand-in provider | Required by the packaged-app test from v0.7.0 (result: see the final report and the workflow run) |
 | Settings persist across a restart (second self-test run) | Passed |
 | Program folder without `bin\ffmpeg.exe`: clear message, app still starts | Passed |
 | Portable ZIP with `portable.txt`: data goes to `UserData\` | Passed |
@@ -483,8 +639,10 @@ model download through your own network; antivirus software reactions.
   the YuNet face model (230 KB) from the OpenCV model zoo on GitHub; without internet the less
   accurate Haar cascade is used. Do not install the non-headless `opencv-python` package in the
   same environment; it bundles its own Qt libraries.
-- Optional AI correction: a Gemini or OpenAI API key, set through the `GEMINI_API_KEY` /
-  `OPENAI_API_KEY` environment variables or stored from Settings in the Windows Credential Manager.
+- Optional AI features (AI Check, Suggest Title): a provider on the AI Models page, with its API
+  key stored in the Windows Credential Manager or an environment variable (`GEMINI_API_KEY` /
+  `OPENAI_API_KEY` still work for the standard profiles). A local OpenAI-compatible server needs
+  no key.
 
 ## Setup and run from source on your Windows PC
 
@@ -556,7 +714,9 @@ py -3.12 -m venv .venv
 | Exported videos | the folder you choose (default next to the source video); source videos are never overwritten |
 | Program files (installer) | `%LOCALAPPDATA%\Programs\AI Video Studio` (or the folder you chose); no user data is stored there |
 | Tracking results, reframe settings | in the project file |
-| Caption presets | in `studio.db` |
+| Caption presets, export presets, the current batch | in `studio.db` |
+| Smart Cut analysis and cuts, Resize & Crop settings | in the project file |
+| AI provider profiles (no keys) and the AI usage history (no prompts or answers) | in `studio.db` |
 | API keys | environment variables or Windows Credential Manager (never in files or logs) |
 
 Set `AVS_DATA_DIR` to use another data folder. In the portable ZIP, a `portable.txt` file next to

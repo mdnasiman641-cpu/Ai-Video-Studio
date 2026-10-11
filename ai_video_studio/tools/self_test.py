@@ -203,6 +203,104 @@ class SelfTest:
             raise AssertionError("no burned-in output")
         return {"srt": "round trip ok", "encoder": result["encoder"], "warnings": result["warnings"]}
 
+    def smart_cut(self):
+        from ai_video_studio.core.ffmpeg_tools import probe_video
+        from ai_video_studio.jobs.render_jobs import RENDER_JOB, SMARTCUT_ANALYZE_JOB
+        from ai_video_studio.render.output import OutputSettings
+        from ai_video_studio.smartcut.levels import AudioLevels
+        from ai_video_studio.smartcut.model import SmartCutState
+
+        clip = self.work / "tone gaps.mp4"
+        on = "lt(mod(t,2),1)"
+        self.ffmpeg_run(["-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=6", "-f", "lavfi", "-i",
+                         f"aevalsrc='0.5*sin(2*PI*440*t)*{on}':s=48000:d=6", "-c:v", "libx264", "-pix_fmt",
+                         "yuv420p", "-c:a", "aac", "-t", "6", str(clip)])
+        levels = AudioLevels.from_dict(self.run_job(SMARTCUT_ANALYZE_JOB, {"path": str(clip), "duration": 6,
+                                                                           "has_audio": True})["levels"])
+        state = SmartCutState(levels=levels)
+        state.detect()
+        keep = state.apply()
+        silences = sum(1 for s in state.segments if s.kind == "silence")
+        if silences != 3:
+            raise AssertionError(f"expected 3 silences, found {silences}")
+        out = self.work / "cut.mp4"
+        result = self.run_job(RENDER_JOB, {"path": str(clip), "output": str(out), "duration": 6, "fps": 25,
+                                           "has_audio": True, "audio_codec": "aac",
+                                           "keep_ranges": [list(r) for r in keep],
+                                           "output_settings": OutputSettings(quality="small").to_dict()})
+        kept = sum(b - a for a, b in keep)
+        duration = probe_video(str(out), self.services.ffprobe_path()).duration
+        if abs(duration - kept) > 0.15:
+            raise AssertionError(f"output {duration:.2f} s, expected {kept:.2f} s")
+        return {"silences": silences, "output_seconds": round(duration, 2), "encoder": result["encoder"]}
+
+    def resize(self):
+        from ai_video_studio.core.ffmpeg_tools import probe_video
+        from ai_video_studio.jobs.render_jobs import RENDER_FRAME_JOB, RENDER_JOB
+        from ai_video_studio.render.layout import ResizeSettings, compute_layout
+        from ai_video_studio.render.output import OutputSettings
+
+        layout = compute_layout(640, 360, ResizeSettings(preset="custom", width=360, height=640, mode="blur"))
+        stage = {"type": "layout", "layout": layout.to_dict()}
+        out = self.work / "vertical.mp4"
+        result = self.run_job(RENDER_JOB, {"path": str(self.clip), "output": str(out), "duration": 4, "fps": 25,
+                                           "has_audio": True, "audio_codec": "aac", "stage": stage,
+                                           "output_settings": OutputSettings(quality="small").to_dict()})
+        meta = probe_video(str(out), self.services.ffprobe_path())
+        if (meta.width, meta.height) != (360, 640):
+            raise AssertionError(f"output is {meta.width}x{meta.height}")
+        frame = self.run_job(RENDER_FRAME_JOB, {"path": str(self.clip), "at": 1.0, "stage": stage})
+        image = Path(frame["image"])
+        if not image.is_file():
+            raise AssertionError("no frame preview")
+        image.unlink()
+        return {"output": f"{meta.width}x{meta.height}", "encoder": result["encoder"], "background": layout.background}
+
+    def batch(self):
+        from ai_video_studio.render.batch import BUILTIN_RENDER_PRESETS
+        from ai_video_studio.render.naming import path_key, plan_outputs, render_name
+
+        names = [n for n, _builtin in self.services.render_presets.names()]
+        missing = [n for n in BUILTIN_RENDER_PRESETS if n not in names]
+        if missing:
+            raise AssertionError(f"missing presets: {missing}")
+        name = render_name("{original_name}_{resolution}", {"original_name": 'a:b"c', "resolution": "1080x1920"})
+        if name != "a_b_c_1080x1920":
+            raise AssertionError(f"unsafe name {name!r}")
+        clash = plan_outputs([("x", self.clip)], "replace", {path_key(self.clip)}, set())[0]
+        if clash.path == self.clip:
+            raise AssertionError("a source video was planned as an output")
+        return {"presets": len(names), "max_concurrent_renders": self.services.jobs.max_heavy}
+
+    def ai_manager(self):
+        import json
+
+        from ai_video_studio.ai.profiles import ProviderProfile
+        from ai_video_studio.ai.router import AIRouter
+        from ai_video_studio.storage import secrets
+
+        profiles = self.services.ai_providers.list()
+        if not profiles:
+            raise AssertionError("no AI provider profiles")
+        calls = []
+
+        def transport(url, headers, body, timeout):  # no network: a stand-in provider
+            calls.append(url)
+            if len(calls) == 1:
+                return 503, {}
+            return 200, {"choices": [{"message": {"content": json.dumps({"ok": True})}}]}
+
+        test = [ProviderProfile("A", "openai_compatible", "m", id="a", base_url="http://localhost:9/v1",
+                                key_required=False, max_retries=0, capabilities=["text", "caption_correction"]),
+                ProviderProfile("B", "openai_compatible", "m", id="b", base_url="http://localhost:9/v1",
+                                key_required=False, capabilities=["text", "caption_correction"])]
+        result = AIRouter(test, lambda p: None, transport=transport, sleep=lambda s: None).request_json(
+            "caption_correction", "s", "u")
+        if result.profile_id != "b" or len(calls) != 2:
+            raise AssertionError("fallback routing did not work")
+        return {"profiles": len(profiles), "secure_key_store": secrets.secure_store_available(),
+                "fallback": "ok"}
+
     def gpu(self):
         from ai_video_studio.captions.transcriber import cuda_device_count
         from ai_video_studio.core.ffmpeg_commands import available_encoders, nvenc_usable
@@ -365,10 +463,14 @@ class SelfTest:
                 self.check("GPU / CUDA / NVENC detection", self.gpu)
                 self.check("face detection (bundled YuNet)", self.face_detection)
                 self.check("auto reframe analysis and export", self.reframe)
+                self.check("smart cut: silence detection and cut export", self.smart_cut)
+                self.check("resize & crop: blur background export and exact frame", self.resize)
+                self.check("bulk processing: presets, safe names, render limit", self.batch)
                 self.check("speech activity (Silero VAD)", self.speech)
                 self.check("Whisper transcription (device auto, CPU fallback)", self.whisper)
                 self.check("project save and reopen", self.project)
                 self.check("temporary files cleaned up", self.temp_cleanup)
+            self.check("AI provider manager (stand-in provider, no network)", self.ai_manager)
             self.check("downloaded Whisper models", self.models)
             self.check("settings persistence", self.settings_persistence)
         finally:

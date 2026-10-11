@@ -42,10 +42,15 @@ at runtime, so no media is committed. Tests that need FFmpeg are skipped when it
   ffmpeg/ffprobe, FFmpeg command builders and encoder selection (`ffmpeg_commands.py`), media model
 - `ai_video_studio/captions/`: caption model and edit operations, SRT, style, ASS generation,
   faster-whisper transcriber, AI correction (no Qt)
-- `ai_video_studio/ai/`: Gemini/OpenAI JSON clients (stdlib HTTP, injectable transport for tests)
+- `ai_video_studio/ai/`: provider profiles (`profiles.py`), HTTP client (`client.py`), capability-aware
+  router with retries/fallback (`router.py`), usage log (`usage.py`); stdlib HTTP, injectable transport
+- `ai_video_studio/smartcut/`: audio levels (FFmpeg astats) and silence detection / cut lists (no Qt)
+- `ai_video_studio/render/`: export settings, cut/stage/subtitle filter graph (`pipeline.py`), resize
+  layout used by preview and export (`layout.py`), batch presets and payloads, safe output names
 - `ai_video_studio/storage/`: SQLite database, settings, project files and recent projects
-- `ai_video_studio/jobs/`: job model, persistent store, manager, handlers (`caption_jobs.py` for
-  transcribe, burn-in, frame preview and AI correction)
+- `ai_video_studio/jobs/`: job model, persistent store, manager (heavy-render limit, held state, stages),
+  handlers (`caption_jobs.py`, `reframe_jobs.py`, `render_jobs.py` for Smart Cut analysis and the shared
+  `render_video` export, `ai_jobs.py` for AI tests and title suggestions)
 - `ai_video_studio/services.py`: wires storage, settings and jobs together
 - `ai_video_studio/ui/`: main window, pages, widgets, theme, project controller
 - `tests/unit`, `tests/integration` (real FFmpeg), `tests/ui` (pytest-qt, offscreen)
