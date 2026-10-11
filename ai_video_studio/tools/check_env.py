@@ -51,6 +51,23 @@ def main() -> int:
         _line(False, "faster-whisper", str(exc))
         failures += 1
 
+    from ai_video_studio.reframe.detection import YUNET_FILE, opencv_cuda_devices, opencv_version
+
+    cv_version = opencv_version()
+    if cv_version is None:
+        _line(False, "OpenCV (face/person detection)", "not installed; run: pip install -r requirements.txt")
+        failures += 1
+    else:
+        _line(True, "OpenCV (face/person detection)", cv_version)
+        cuda = opencv_cuda_devices()
+        _line(None, "Face detection device",
+              f"CUDA ({cuda} device(s))" if cuda else "CPU (pip OpenCV builds have no CUDA; this is expected)")
+        from ai_video_studio.core import paths
+
+        model = paths.data_dir() / "models" / YUNET_FILE
+        _line(None, "YuNet face model", str(model) if model.is_file()
+              else "not downloaded yet (downloaded automatically on the first analysis)")
+
     from ai_video_studio.storage import secrets
 
     _line(None, "Secure API-key storage", "available" if secrets.secure_store_available()

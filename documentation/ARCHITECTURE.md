@@ -19,6 +19,7 @@ services.py    wires the pieces together (one instance per app run)
         └── handlers.py     job implementations (Phase 1: FFprobe metadata)
 core/          no Qt: paths, logging, errors, process runner, ffmpeg/ffprobe, media model
 captions/      no Qt: caption model + edits, SRT, style, ASS, transcriber, AI correction
+reframe/       no Qt: detections/tracks model, OpenCV detectors, tracker, analysis, crop path, sendcmd export
 ai/            no Qt: Gemini/OpenAI JSON clients
 ```
 
@@ -60,6 +61,25 @@ SRT file ───────────────────────�
 
 `core/`, `storage/` and `jobs/` never import Qt, so they can be tested without a display and
 reused by a future command-line or batch runner.
+
+## Auto reframe pipeline (Phase 3)
+
+```
+Analyse (job reframe_analyze)
+  ffmpeg -vf fps=N:round=up,scale=… -f rawvideo bgr24  ──pipe──▶ core.process.run_frames (one frame in RAM)
+      └─▶ reframe.detection.DetectorSet (YuNet faces | Haar fallback; HOG persons when no face)
+          └─▶ reframe.tracker.IouTracker ──▶ TrackingAnalysis (normalised boxes, stored in the project)
+Settings change (GUI thread, no decoding)
+  reframe.framing.compute_crop_path(analysis, settings) ──▶ CropPath (10 keyframes/s, source pixels)
+      desired position → zero-lag EMA → camera (dead zone, speed limit, transitions, keep-in-frame) → clamp
+Export (job reframe_export; payload = crop keyframes + output size + ASS text snapshot)
+  reframe.export.sendcmd_script ──▶ reframe.cmd ; captions.ass      (job temp folder, plain names)
+  ffmpeg -vf sendcmd=f=reframe.cmd,crop=…,scale=W:H,setsar=1[,subtitles=captions.ass]
+      └─ jobs.encode.encode_with_fallback (NVENC after test encode, else libx264; .part → rename)
+```
+
+The Auto Reframe page draws both previews from the frame the player has already decoded; the
+**Exact Frame Preview** job renders one frame through the same FFmpeg filters as the export.
 
 ## Threading
 

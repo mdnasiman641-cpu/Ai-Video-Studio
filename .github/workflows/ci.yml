@@ -26,6 +26,8 @@ jobs:
       AVS_TEST_WHISPER_MODEL_DIR: ${{ github.workspace }}/.cache/whisper-tiny
       AVS_TEST_WHISPER_BN_MODEL_DIR: ${{ github.workspace }}/.cache/whisper-small
       AVS_REQUIRE_REAL_WHISPER: "1"
+      AVS_TEST_REFRAME_ASSETS: ${{ github.workspace }}/.cache/reframe-assets
+      AVS_REQUIRE_REAL_DETECTOR: "1"
       PYTHONFAULTHANDLER: "1"
     steps:
       - uses: actions/checkout@v4
@@ -66,6 +68,22 @@ jobs:
           python -c "from huggingface_hub import snapshot_download as d; print(d('Systran/faster-whisper-tiny', local_dir='.cache/whisper-tiny'))"
           python -c "from huggingface_hub import snapshot_download as d; print(d('Systran/faster-whisper-small', local_dir='.cache/whisper-small'))"
           ls -la .cache/whisper-tiny .cache/whisper-small
+
+      - name: Cache face detection test assets
+        uses: actions/cache@v4
+        with:
+          path: .cache/reframe-assets
+          key: reframe-assets-yunet2023mar-astronaut-v1
+
+      - name: Download face detection assets (YuNet via the app's verified downloader + test photo)
+        shell: bash
+        run: |
+          mkdir -p .cache/reframe-assets
+          python -c "from pathlib import Path; from ai_video_studio.reframe.detection import ensure_face_model as f; p = f(Path('.cache/reframe-assets')); print(p); assert p, 'YuNet download or checksum failed'"
+          # Public-domain NASA photo shipped with scikit-image; the test checks its SHA-256.
+          test -f .cache/reframe-assets/astronaut.png || curl -fsSL -o .cache/reframe-assets/astronaut.png \
+            https://raw.githubusercontent.com/scikit-image/scikit-image/v0.19.3/skimage/data/astronaut.png
+          ls -la .cache/reframe-assets
 
       - name: Environment check
         run: python -m ai_video_studio.tools.check_env

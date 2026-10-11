@@ -2,9 +2,9 @@
 
 A Windows desktop video editor (Python + PySide6 + FFmpeg) built for 1080p
 short-form work: captions, face-tracked reframing, silence removal, resizing and
-batch export. It is being built in phases. **Phases 1 (foundation) and 2
-(captions) are done.** Later features are listed in the app as "planned" and are
-not presented as working.
+batch export. It is being built in phases. **Phases 1 (foundation), 2 (captions)
+and 3 (face tracking and auto reframe) are done.** Later features are listed in the
+app as "planned" and are not presented as working.
 
 ## Status
 
@@ -13,7 +13,7 @@ not presented as working.
 | 0 | Repository audit and plan | Done ([documentation/ROADMAP.md](documentation/ROADMAP.md)) |
 | 1 | Foundation: UI shell, import, metadata, preview, projects, SQLite, jobs, settings, logging | **Done** |
 | 2 | Caption generation, editing, styling, SRT, burn-in, optional AI correction | **Done**: implemented and tested; see [Verification status](#verification-status) for what is and is not verified (Bengali quality, GPU, real AI providers) |
-| 3 | Face tracking and auto-reframe | Planned |
+| 3 | Face/person tracking and AI auto reframe | **Done**: implemented and tested with real FFmpeg and real OpenCV detection; GPU/NVENC and your own footage not yet verified (see [Verification status](#verification-status)) |
 | 4 | Silence removal and manual cutting | Planned |
 | 5 | Resize and visual editing | Planned |
 | 6 | Bulk editing and batch export | Planned |
@@ -89,6 +89,91 @@ not presented as working.
   A transcription that finishes while its project is closed is applied the next time the project
   is opened, unless that video already has captions.
 
+### What works now (Phase 3: AI auto reframe)
+
+Open the **Auto Reframe** page, pick a video and click **Analyse Video**.
+
+- **Detection** (OpenCV, runs on the CPU):
+  - Faces: the **YuNet** DNN face detector. Its 230 KB model is downloaded automatically on the
+    first analysis and checked against a SHA-256 hash. Without internet access, OpenCV's bundled
+    **Haar cascade** is used instead (frontal faces only, less accurate) and a warning says so.
+  - People: OpenCV's **HOG** person detector looks for full bodies in frames where no face is
+    found (optional, slower). It finds upright, mostly full-body people that are reasonably large.
+  - FFmpeg decodes frames at a reduced size (longer side 960 px) and a configurable rate
+    (default 5 frames per second of video), one frame in memory at a time. On the Ryzen 7 7700
+    this should be much faster than real time (measured here: 30 frames in under 1 s on a
+    cloud CPU); it has **not been measured on your PC**.
+- **Tracking**: every subject gets a stable ID (#1, #2, …) with a confidence value. Boxes are
+  matched by overlap and predicted motion, so two people next to each other keep their IDs. Short
+  gaps (occlusion, a missed detection) keep the ID. One-frame false detections are dropped.
+- **Subject selection**: *Automatic* follows the best visible subject (faces preferred, then
+  size, confidence and screen time). You can pick a subject to follow **from the start**, or switch
+  to another subject **from the playhead**. Double-click a subject to jump to where it appears.
+  When the followed person disappears and one new track appears near the same place within 3 s,
+  it is treated as the same person. With two candidates it does not guess.
+- **Formats**: original aspect ratio, 16:9, 9:16 (Reels, Shorts, TikTok), 1:1 and 4:5, with output
+  sizes such as 1080×1920, 720×1280, 1080×1080, 1080×1350 and 1920×1080. The crop always has the
+  target aspect ratio (no stretching) and stays inside the frame.
+- **Camera motion**: smoothing (run forwards and backwards, so it adds no delay), maximum speed,
+  a dead zone that ignores small movements while the camera is still, a hold time when the
+  subject is lost (then an eased return to the centre), and eased transitions when the subject
+  changes or reappears. The face is always kept inside the crop, even if that means moving faster
+  than the speed limit.
+- **Manual framing**: zoom, padding around the face, subject height in the frame, horizontal and
+  vertical offset, and **Reset to Automatic Framing**. **Center crop (no tracking)** is a separate,
+  explicit mode.
+- **Caption-safe framing**: reserve the bottom or top part of the output for captions; the face is
+  kept out of that area where the crop allows it. Captions can be burned in. Caption text, timing,
+  style and SRT files are not changed.
+- **Preview**: the source video with the crop rectangle, the detected boxes and IDs (the followed
+  subject in green) and the caption area; next to it the reframed output with captions, drawn from
+  the frame already decoded by the player. **Exact Frame Preview** renders the current frame with
+  FFmpeg exactly as the export will.
+- **Export**: the crop moves frame by frame. A `sendcmd` script generated from the tracking path
+  drives FFmpeg's `crop` filter, followed by scaling and optional subtitle burn-in in one filter
+  graph. Timestamps are kept, so the frame rate and audio sync match the source. AAC audio is
+  copied. The same encoder logic as caption export is used: NVENC only when a test encode succeeds,
+  otherwise libx264, and libx264 again if NVENC fails mid-export. Output goes to `*.part.mp4` first;
+  cancel removes it. The source video is never modified.
+- **Warnings instead of silent bad results**: no faces/people found, subject visible in under half
+  the video, low confidence, decoding stopped early (damaged file), video changed since analysis,
+  Haar fallback in use. Exporting with an open warning asks for confirmation first.
+- Tracking results and settings are saved in the project (format version 3; version 1 and 2 files
+  still open), so reopening a project does not re-analyse.
+
+### Verify an exported reframed video
+
+1. Play it next to the **Exact Frame Preview** at a few positions; they should match.
+2. Check the size, frame rate and audio, for example:
+   ```bat
+   ffprobe -v error -show_entries stream=codec_type,width,height,avg_frame_rate -of compact output.mp4
+   ```
+   The video line should show the chosen output size and the same frame rate as the source, and
+   there should be an audio line if the source had audio.
+3. Scrub through moments where people move, turn away, leave or enter. The followed person should
+   stay in frame, the camera should not jitter or jump, and captions should not cover the face.
+
+### Known limitations (auto reframe)
+
+- **Detection runs on the CPU only.** The pip OpenCV builds have no CUDA, so the RTX 4070 is not
+  used for detection (it can still be used for transcription and, if verified, NVENC encoding).
+- **Profile and turned-away faces**: YuNet finds frontal and moderately turned faces; a face seen
+  from the side or from behind is often lost. Turning on full-body detection helps only when no
+  other face is visible, because the person detector runs only on frames without any face.
+- **Full-body detection (HOG)** is basic: upright, mostly full people at least about a quarter of
+  the frame height. Seated, cropped or small people are often missed. Its accuracy has not been
+  measured on real footage.
+- **Identity is position-based.** There is no face recognition: after someone leaves and comes
+  back, they get a new ID unless they reappear near the same place within 3 seconds. Use
+  **Follow From Playhead** to pick them again.
+- **Fast motion** between analysed frames is interpolated; raise the analysis rate for sports or
+  quick movement.
+- The crop has a fixed size per export (no automatic zoom). A 9:16 crop of a 1080p video is
+  608×1080 and is upscaled to 1080×1920, which softens the image; the output info line shows the
+  scale factor.
+- Caption sizes follow the caption style and scale with the output height, as for any export. For
+  vertical output you may want a smaller font or fewer characters per line (Captions → Style).
+
 ## Verification status
 
 Automated checks run on every push in GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
@@ -114,6 +199,15 @@ GitHub's runners have **no NVIDIA GPU**, and nothing has been tested on a Window
 | Optional AI correction (Gemini / OpenAI) | Request/response handling with **mocked** HTTP | **Not tested against the real APIs** (no API keys in CI) |
 | NVIDIA CUDA transcription, NVENC encoding | Detection logic + CPU fallback only | **Not verified** (no GPU available); NVENC is listed in FFmpeg but the test encode correctly fails on the runners |
 | Cut sync (`remap_to_cuts`) | Unit tests | Passed; no cutting UI until Phase 4 |
+| **Phase 3 crop maths** (all presets, bounds, smoothing, dead zone, speed limit, loss/hold, subject changes, reappearance, caption-safe area) | Unit tests on synthetic tracks | Passed |
+| Tracker IDs (two people crossing, occlusion, false positives, fast motion) | Unit tests on synthetic detections | Passed |
+| **Real face detection** (YuNet, Haar fallback) | Public-domain NASA photo moving through a generated video; one and two faces | Passed on Linux in this environment (YuNet: face in 30 of 30 frames, confidence 0.93; two people kept apart). CI runs it on Windows and Linux |
+| HOG person detection | Runs in the pipeline; no test footage of full-body people | **Accuracy not measured** |
+| Analysis timing, time-varying crop export, scaling, captions, audio, frame rate | Real FFmpeg: moving marker, colour-threshold stand-in detector, pixel checks on the exported MP4 | Passed |
+| Reframe export / analysis cancel, corrupt and missing files | Real FFmpeg | Passed |
+| Auto Reframe page | GUI tests (offscreen) | Passed; **not checked by eye on a real screen** |
+| Detection speed on your Ryzen 7 7700, real talking-head footage | — | **Not measured / not tested** |
+| GPU for detection | — | Not used: pip OpenCV has no CUDA. Detection is CPU-only by design |
 
 ### Bengali: synthetic tests vs real speech
 
@@ -159,6 +253,10 @@ your own videos. GPU inference was not tested and should give the same text, onl
   not produce Bengali text in tests, and even the large models need proofreading (see above).
 - Optional GPU transcription: `scripts\windows\setup.bat --gpu` installs the CUDA 12 cuBLAS and
   cuDNN 9 runtime wheels. Not yet verified on real NVIDIA hardware.
+- Auto reframe uses `opencv-python-headless` (installed by `setup.bat`). The first analysis downloads
+  the YuNet face model (230 KB) from the OpenCV model zoo on GitHub; without internet the less
+  accurate Haar cascade is used. Do not install the non-headless `opencv-python` package in the
+  same environment; it bundles its own Qt libraries.
 - Optional AI correction: a Gemini or OpenAI API key, set through the `GEMINI_API_KEY` /
   `OPENAI_API_KEY` environment variables or stored from Settings in the Windows Credential Manager.
 
@@ -178,12 +276,21 @@ your own videos. GPU inference was not tested and should give the same text, onl
    scripts\windows\setup.bat --gpu
    ```
    The last lines must say `Environment OK`. Check that the `CUDA devices visible to CTranslate2`
-   line shows `1`; if it shows `0`, transcription will use the CPU.
+   line shows `1`; if it shows `0`, transcription will use the CPU. The `OpenCV` line must be OK;
+   `Face detection device: CPU` is expected (face detection does not use the GPU).
 5. Start the app: `scripts\windows\run.bat` (or `scripts\windows\run.bat --console` to watch live logs).
 6. Optional: run the tests with `scripts\windows\run_tests.bat`. To include the real-Whisper tests:
    ```bat
    .venv\Scripts\python -c "from huggingface_hub import snapshot_download as d; d('Systran/faster-whisper-tiny', local_dir='.cache/whisper-tiny')"
    set AVS_TEST_WHISPER_MODEL_DIR=%CD%\.cache\whisper-tiny
+   scripts\windows\run_tests.bat
+   ```
+   To include the real face detection tests (downloads the 230 KB YuNet model and a public-domain test photo):
+   ```bat
+   mkdir .cache\reframe-assets
+   .venv\Scripts\python -c "from pathlib import Path; from ai_video_studio.reframe.detection import ensure_face_model as f; print(f(Path('.cache/reframe-assets')))"
+   curl -L -o .cache\reframe-assets\astronaut.png https://raw.githubusercontent.com/scikit-image/scikit-image/v0.19.3/skimage/data/astronaut.png
+   set AVS_TEST_REFRAME_ASSETS=%CD%\.cache\reframe-assets
    scripts\windows\run_tests.bat
    ```
 
@@ -214,7 +321,8 @@ py -3.12 -m venv .venv
 | Settings, recent projects, job history | `%LOCALAPPDATA%\AIVideoStudio\studio.db` |
 | Logs (JSON lines, rotated 5 × 5 MB) | `%LOCALAPPDATA%\AIVideoStudio\logs\` |
 | Projects | wherever you save them (default `Documents\AI Video Studio Projects`) |
-| Whisper models | `%LOCALAPPDATA%\AIVideoStudio\models\` |
+| Whisper models, YuNet face model | `%LOCALAPPDATA%\AIVideoStudio\models\` |
+| Tracking results, reframe settings | in the project file |
 | Caption presets | in `studio.db` |
 | API keys | environment variables or Windows Credential Manager (never in files or logs) |
 

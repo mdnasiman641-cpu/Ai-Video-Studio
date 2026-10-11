@@ -2,7 +2,48 @@
 
 All notable changes are listed here. Versions follow semantic versioning.
 
-## [0.2.1] - Unreleased
+## [0.3.0] - Unreleased
+
+Phase 3: face/person tracking and AI auto reframe.
+
+### Added
+- **Auto Reframe page** (replaces the "Face Tracking" placeholder):
+  - Background analysis job: FFmpeg decodes sampled, downscaled frames (one in memory at a time);
+    OpenCV detects faces (YuNet DNN; Haar cascade fallback when the model cannot be downloaded)
+    and, optionally, full-body people (HOG) in frames without faces. Progress and cancel.
+  - Tracker with stable subject IDs, confidence, occlusion bridging and false-positive filtering.
+  - Subject choice: automatic, a chosen subject from the start, or a switch from the playhead.
+    Reappearance near the last position continues the same subject; ambiguous cases do not.
+  - Presets: original, 16:9, 9:16, 1:1, 4:5, with selectable output sizes.
+  - Virtual camera: zero-lag smoothing, dead zone with hysteresis, speed limit, hold-then-recentre
+    on loss, eased transitions on subject changes; the face is always kept in the crop.
+  - Manual framing (zoom, padding, subject height, offsets, reset) and an explicit Center crop mode.
+  - Caption-safe area (bottom/top) and optional caption burn-in; captions themselves are untouched.
+  - Source preview with crop, boxes, IDs and caption area; reframed output preview; FFmpeg
+    exact-frame preview.
+  - Export with a crop that moves per frame (`sendcmd` → `crop` → `scale` → `subtitles`),
+    keeping frame rate and audio sync; NVENC only after a successful test encode, else libx264.
+  - Warnings for no subjects, low coverage or confidence, damaged files, changed source files and
+    the Haar fallback; export asks for confirmation while a warning is shown.
+- Dependency: `opencv-python-headless>=4.10,<5` (CPU; no CUDA in pip builds).
+- `check_env` reports OpenCV, the face detection device and whether the YuNet model is present.
+- Tests: crop geometry for all presets, bounds, smoothing, dead zone, speed limit, loss recovery,
+  subject changes, caption-safe framing, tracker IDs, detector fallbacks, model download checks,
+  sendcmd/filter generation, persistence, real-FFmpeg analysis/export with pixel checks,
+  cancellation, damaged files, GUI tests, and real YuNet/Haar detection on a public-domain photo
+  (CI downloads the model and photo; both are hash-checked).
+
+### Changed
+- Project file format version 3 (adds optional per-video `reframe` data). Version 1 and 2 files
+  still open.
+- Burn-in export and reframe export share one encode step (`jobs/encode.py`); behaviour unchanged.
+
+### Fixed
+- **Possible freeze when a video was loaded into or removed from a preview** (all pages): the
+  preview called `pause()` from inside `player.stop()`, which could deadlock Qt's FFmpeg media
+  backend. Found by repeated GUI test runs; the call is now deferred.
+
+## [0.2.1]
 
 ### Added
 - GitHub Actions CI on `windows-latest` and `ubuntu-latest`:

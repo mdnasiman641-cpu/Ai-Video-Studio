@@ -23,10 +23,9 @@ Phase 1 adds no other dependencies. Planned additions, each checked for compatib
 - Phase 2 (added): `faster-whisper` 1.1–1.x (CTranslate2 4.x; CUDA 12 cuBLAS + cuDNN 9 for GPU,
   optional `requirements-gpu.txt`; CPU int8 fallback) and `keyring` (Windows Credential Manager).
   Model weights download at first use to the data folder, never into the repo.
-- Phase 3: `opencv-python` and `mediapipe`. **MediaPipe Python runs on the CPU on Windows; it
-  does not use CUDA.** On a Ryzen 7 7700, 1080p face detection on downscaled frames should be fast
-  enough, but this must be benchmarked. A CUDA alternative (e.g. an ONNX Runtime GPU face detector)
-  will only be considered if the measurements call for it.
+- Phase 3 (added): `opencv-python-headless` only (MediaPipe was evaluated and not used; see
+  "Phase 3" below). Detection runs on the CPU. A CUDA alternative (e.g. an ONNX Runtime GPU face
+  detector) will only be considered if measurements on real footage call for it.
 - Phase 7: official `google-genai` and `openai` SDKs. Keys go in the Windows Credential Manager
   (via `keyring`) or the user DB, never in the repo.
 - Phase 8: `psutil` for CPU/RAM. GPU usage via `nvidia-smi` or NVML when present.
@@ -37,6 +36,8 @@ Phase 1 adds no other dependencies. Planned additions, each checked for compatib
 
 1. **Foundation**: done (see README).
 2. **Captions**: done (v0.2.0). Windows-readiness verification done in v0.2.1 (see below).
+3. **Tracking/reframe**: done (v0.3.0). See "Phase 3" below.
+4. to 9.: not started; listed under "Remaining phases".
 
 ## Phase 2 verification (v0.2.1, GitHub Actions `windows-latest` + `ubuntu-latest`)
 
@@ -83,12 +84,59 @@ Still unverified:
   combination the app uses (Qt Multimedia, PyAV, CTranslate2, full faster-whisper transcription),
   and none aborted. The cause is not identified; so far it has only appeared at the end of the full
   pytest run. As a precaution, the app releases the Whisper model before interpreter shutdown.
+  Update (Phase 3 work): it also happens on Linux. On commit 3590586 (before Phase 3), the full
+  test run crashed with a segmentation fault at exit, after all tests passed, in 2 of 10 runs in a
+  Linux container (no Python frame in the dump). With Phase 3 it occurred in 1 of 8 runs. The cause
+  is still not identified.
 
-Next phase (not started): **Phase 3, face tracking and auto-reframe.**
-3. **Tracking/reframe**: detection on sampled frames, IoU/centroid tracker with target selection,
-   confidence, smoothing (EMA + dead zone + max speed), loss recovery (hold, then ease to centre),
-   crop-path editor with manual keyframes, export with a crop path that varies over time
-   (`sendcmd`/per-segment crops or piping frames).
+## Phase 3: face tracking and auto reframe (v0.3.0)
+
+Library choice: **OpenCV (`opencv-python-headless`) instead of MediaPipe.** The plan above named
+MediaPipe; on inspection it was not chosen because:
+- MediaPipe's current Tasks API also needs separately downloaded model files, so it saves nothing
+  over OpenCV's YuNet model (230 KB, hash-checked).
+- Its Windows wheels pin `protobuf`/`numpy` ranges and lag new Python releases, which risks
+  conflicts with faster-whisper/CTranslate2.
+- Its Python package runs on the CPU on Windows, like OpenCV. So it gives no GPU advantage.
+- OpenCV headless brings the face detector (YuNet), a no-download fallback (Haar) and a person
+  detector (HOG) in one dependency with no Qt libraries of its own.
+
+Design:
+- Frames are decoded by FFmpeg (`fps=N:round=up`, downscaled, raw BGR over a pipe), so analysis
+  uses the same decoder, rotation handling and clock as export. `round=up` was needed: with the
+  default rounding FFmpeg 6.1 picked frames about 2 source frames late (found by the real-FFmpeg
+  timing test).
+- Tracker: greedy IoU + predicted-centre matching per kind, tracks closed after 1.5 s unseen,
+  one-frame tracks dropped, IDs renumbered by first appearance.
+- Crop path (10 keyframes/s): desired position → forward-backward EMA with odd-reflection padding
+  (no lag, no end effects) → camera simulation (dead zone with hysteresis, speed limit, eased
+  transitions, hard keep-in-frame for the face) → clamped to the frame.
+- Export: `sendcmd` script with a `crop x/y` command per output frame where the position changes,
+  then `scale` and `subtitles` in one graph. Pixel tests confirm the crop follows the subject.
+
+Phase 3 verification:
+- Unit tests for geometry, smoothing, tracking, persistence and command generation.
+- Real-FFmpeg tests: analysis timing, moving-crop export (pixel checks), captions, audio, frame
+  rate, cancel and damaged files.
+- Real OpenCV detection on a public-domain NASA photo moving through a generated video: YuNet found
+  the face in 30 of 30 analysed frames (mean confidence 0.93) and kept two people apart; the Haar
+  fallback also found the face, plus a short false track. CI runs these on Windows and Linux.
+
+Still unverified (Phase 3):
+- **Real footage** (talking heads, several people, movement, profile views, low light) and
+  detection speed on the user's Ryzen 7 7700.
+- **HOG person detection accuracy**: no full-body test footage.
+- **NVENC encoding of reframed exports**: no GPU in CI (same as Phase 2).
+- **A real Windows desktop** and on-screen checks of the Auto Reframe previews.
+- Found and fixed while testing Phase 3: `VideoPreview` called `pause()` from inside
+  `player.stop()` (via the `LoadedMedia` signal). This could deadlock Qt's FFmpeg backend when a
+  clip was loaded or unloaded; it hung the GUI tests intermittently. The call is now deferred to
+  the event loop.
+
+## Remaining phases
+
+Next phase (not started): **Phase 4, silence removal and manual cutting.**
+
 4. **Smart cut**: `silencedetect` parsing, cut-proposal model, accept/reject, manual ranges,
    undo/redo stack, keep-segment merge, caption remapping, and frame-accurate export with
    `trim/atrim` + `concat` in one filter graph.
@@ -113,5 +161,5 @@ Next phase (not started): **Phase 3, face tracking and auto-reframe.**
 - **Frame-accurate cutting** needs re-encoding. Stream copy cuts only at keyframes, so it will
   only be offered when exact accuracy isn't needed.
 - **Whisper on GPU** needs matching CUDA/cuDNN DLLs. The CPU fallback must always work.
-- **Time-varying crop** in FFmpeg filters is awkward. Feeding OpenCV-cropped frames into an
-  FFmpeg encoder pipe is the fallback.
+- **Time-varying crop**: solved with `sendcmd` driving `crop` (tested with pixel checks). If a
+  future FFmpeg changes `crop` commands, feeding cropped frames into an encoder pipe is the fallback.
