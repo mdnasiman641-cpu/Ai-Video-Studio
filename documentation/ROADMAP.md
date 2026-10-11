@@ -38,7 +38,8 @@ Phase 1 adds no other dependencies. Planned additions, each checked for compatib
 2. **Captions**: done (v0.2.0). Windows-readiness verification done in v0.2.1 (see below).
 3. **Tracking/reframe**: done (v0.3.0). See "Phase 3" below.
 4. **Smart Cut**: done (v0.7.0). See "Phase 4" below.
-5. to 9.: see the sections below and "Remaining phases".
+5. **Resize & Crop**: done (v0.7.0). See "Phase 5" below.
+6. to 9.: see the sections below and "Remaining phases".
 
 ## Phase 2 verification (v0.2.1, GitHub Actions `windows-latest` + `ubuntu-latest`)
 
@@ -267,6 +268,42 @@ output protection, H.265 export, and the GUI flow from analyse to export, SRT an
 
 **Not verified:** real recordings (music beds, noisy rooms), long videos on the user's PC, and
 NVENC on the RTX 4070.
+
+## Phase 5: Resize & Crop (v0.7.0)
+
+**Design**
+- **Presets:** Original, 1920×1080, 1080×1920, 1080×1080, 1080×1350, 720×1280, 1280×720, and a
+  custom size (even, 64–7680 × 64–4320).
+- **Modes:**
+  - Fit (pad with a colour) and Blur background (the whole frame over a blurred copy);
+  - Fill (crop the excess, with a horizontal/vertical position);
+  - Crop (a chosen region, optionally locked to the output aspect);
+  - Custom position and size;
+  - Auto Reframe (uses the video's Auto Reframe analysis and tracking mode for 16:9, 9:16, 1:1
+    and 4:5 outputs).
+- **One layout calculation** (`render/layout.py`) maps a source rectangle to a canvas rectangle,
+  using even integers. The output preview draws that layout from the current player frame; the
+  FFmpeg filter (`crop`, `scale`, `pad` or `split`/`boxblur`/`overlay`) is generated from the
+  same layout. **Exact Frame Preview** renders one frame through the export graph.
+- **Preview and settings:**
+  - the source view shows the used region;
+  - the canvas preview shows safe areas (90 %), typical vertical-app overlay zones, and captions
+    at the output size;
+  - info shows output size, aspect ratio, scale factor, and warnings for enlarging.
+  - Captions are rendered on the final canvas, so they can sit in the padding of a Fit layout.
+  - Settings are stored per video in the project. Smart Cut cuts can be applied in the same
+    export. Exports use the shared export dialog and the queue.
+
+**Verified (Linux, real FFmpeg):**
+- pixels of exported frames match the layout rectangles for Fit (coloured padding), Fill
+  (position), Blur and Custom;
+- the exact-frame preview equals the exported frame (mean difference below 6/255);
+- captions are drawn in the lower padding of a vertical Fit layout;
+- resize combined with cuts, and a moving Auto Reframe crop combined with cuts (crop keyframes
+  mapped to the edited timeline);
+- GUI: live layout, validation, canvas painting, export and project reopen.
+
+**Not verified:** how the canvas preview looks on a real screen, and NVENC.
 
 ## Remaining phases
 

@@ -32,6 +32,27 @@ Phases 4 to 7: Smart Cut, Resize & Crop, Bulk Processing and the AI provider man
 - Settings → Export: default settings for edited exports (the last used settings are remembered).
 - Export Queue: Open Output Folder; labels for every job type.
 
+### Added — Phase 5: Resize & Crop
+- **Resize & Crop page**, replacing the placeholder:
+  - size presets (Original, 1920×1080, 1080×1920, 1080×1080, 1080×1350, 720×1280, 1280×720)
+    and a custom size;
+  - modes: Fit, Fill, Crop, Blur background, Custom position and size, and Auto Reframe;
+  - position sliders, size (zoom), crop region with aspect lock, background colour and blur
+    strength.
+- **Previews:**
+  - the source view shows the used region; the output canvas preview draws the same geometry
+    as the export;
+  - safe areas and vertical-app overlay zones, and captions at the output size;
+  - output size, aspect ratio, scale factor and enlarge warnings;
+  - Exact Frame Preview (rendered by FFmpeg through the export graph).
+- **Export:**
+  - export with the shared settings dialog (H.264/H.265, CPU/NVENC, quality/bitrate, frame
+    rate, audio);
+  - optional caption burn-in at the output size, and optional Smart Cut cuts;
+  - status with Cancel, Retry and Open Output Folder.
+- `render_frame_preview` job, and `layout`/`reframe` stages for `render_video`. The Auto Reframe
+  crop also works together with cuts.
+
 ### Changed
 - Project format version 5 (adds the optional `smart_cut` and `resize` entries per video).
   Older projects open unchanged.

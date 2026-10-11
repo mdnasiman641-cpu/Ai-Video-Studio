@@ -11,11 +11,6 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from ai_video_studio.ui.widgets.common import Card, muted, page_title, section_title
 
 PLANNED_PAGES: dict[str, tuple[int, list[str]]] = {
-    "Resize & Crop": (5, [
-        "1920x1080, 1080x1920, 1080x1080 and custom output",
-        "Fit, fill, crop, blur background, manual positioning",
-        "Frame rate, H.264/H.265, quality and audio settings",
-    ]),
     "Bulk Processing": (6, [
         "Per-video and shared settings, presets",
         "Batch export with filename templates and duplicate protection",

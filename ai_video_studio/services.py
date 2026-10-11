@@ -33,8 +33,10 @@ from ai_video_studio.jobs.reframe_jobs import (
     make_reframe_preview_handler,
 )
 from ai_video_studio.jobs.render_jobs import (
+    RENDER_FRAME_JOB,
     RENDER_JOB,
     SMARTCUT_ANALYZE_JOB,
+    make_render_frame_handler,
     make_render_handler,
     make_smartcut_analyze_handler,
 )
@@ -79,6 +81,7 @@ class Services:
         self.jobs.register(REFRAME_PREVIEW_JOB, make_reframe_preview_handler(self.ffmpeg_path))
         self.jobs.register(SMARTCUT_ANALYZE_JOB, make_smartcut_analyze_handler(self.ffmpeg_path))
         self.jobs.register(RENDER_JOB, make_render_handler(self.ffmpeg_path))
+        self.jobs.register(RENDER_FRAME_JOB, make_render_frame_handler(self.ffmpeg_path))
         self.settings.subscribe(self._on_setting_changed)
 
     def ffprobe_path(self) -> Path:

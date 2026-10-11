@@ -29,11 +29,18 @@ from ai_video_studio.jobs.caption_jobs import (
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, REFRAME_EXPORT_JOB, REFRAME_PREVIEW_JOB
-from ai_video_studio.jobs.render_jobs import RENDER_JOB, SMARTCUT_ANALYZE_JOB, output_key
+from ai_video_studio.jobs.render_jobs import RENDER_FRAME_JOB, RENDER_JOB, SMARTCUT_ANALYZE_JOB, output_key
+from ai_video_studio.render.layout import Layout, LayoutError, ResizeSettings, compute_layout, layout_notes
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.smartcut.levels import AudioLevels
 from ai_video_studio.smartcut.model import SmartCutState
-from ai_video_studio.reframe.framing import CropPath, caption_band_from_style, compute_crop_path, resolve_output_size
+from ai_video_studio.reframe.framing import (
+    ASPECT_PRESETS,
+    CropPath,
+    caption_band_from_style,
+    compute_crop_path,
+    resolve_output_size,
+)
 from ai_video_studio.reframe.model import ReframeSettings, ReframeState, TrackingAnalysis
 from ai_video_studio.services import Services
 from ai_video_studio.storage.project import Project
@@ -92,6 +99,7 @@ class ProjectController(QObject):
     reframe_analysis_finished = Signal(str, object)  # media id, job (completed, failed or cancelled)
     smartcut_changed = Signal(str)      # media id: cut proposal, settings or applied cuts changed
     smartcut_analysis_finished = Signal(str, object)  # media id, job
+    resize_changed = Signal(str)        # media id: Resize & Crop settings changed
 
     def __init__(self, services: Services, bridge: JobBridge, parent: QObject | None = None):
         super().__init__(parent)
@@ -688,4 +696,78 @@ class ProjectController(QObject):
             "stage": stage, "ass": ass, "output_settings": settings.to_dict(), "preview": preview,
         }
         return self.services.jobs.submit(RENDER_JOB, title or f"Export edited video: {item.name}", payload,
+                                         project_id=self.project.id)
+
+    # -- resize & crop ------------------------------------------------------------------
+    def resize_settings(self, media_id: str) -> ResizeSettings:
+        item = self.media(media_id)
+        return ResizeSettings.from_dict(item.resize.to_dict()) if item.resize else ResizeSettings()
+
+    def set_resize_settings(self, media_id: str, settings: ResizeSettings) -> None:
+        settings.validate()
+        self.media(media_id).resize = ResizeSettings.from_dict(settings.to_dict())
+        self.project.dirty = True
+        self.resize_changed.emit(media_id)
+        self.dirty_changed.emit(True)
+
+    def resize_layout(self, media_id: str, settings: ResizeSettings | None = None) -> Layout:
+        item = self.media(media_id)
+        if item.metadata is None:
+            raise StudioError("Video information has not been read yet.")
+        s = settings or self.resize_settings(media_id)
+        return compute_layout(item.metadata.display_width, item.metadata.display_height, s)
+
+    def reframe_path_for(self, media_id: str, out_w: int, out_h: int, burn_captions: bool) -> CropPath:
+        """The Auto Reframe crop path for an output of ``out_w``×``out_h`` (uses the stored analysis)."""
+        item = self.media(media_id)
+        preset = next((name for name, ratio in ASPECT_PRESETS.items()
+                       if ratio and abs(ratio[0] / ratio[1] - out_w / out_h) < 0.01), None)
+        if preset is None:
+            raise LayoutError("Auto Reframe works for 16:9, 9:16, 1:1 and 4:5 outputs. Choose one of those sizes "
+                              "or another mode.")
+        state = self.reframe_state(media_id)
+        settings = ReframeSettings.from_dict(state.settings.to_dict())
+        settings.preset, settings.output_width, settings.output_height = preset, out_w, out_h
+        if settings.tracks_subjects and state.analysis is None:
+            raise LayoutError("Auto Reframe needs a face/person analysis. Analyse this video on the Auto Reframe "
+                              "page first (or choose Center Crop there).")
+        meta = item.metadata
+        band = caption_band_from_style(item.effective_caption_style) if burn_captions and item.captions else None
+        return compute_crop_path(state.analysis, settings, meta.display_width, meta.display_height, meta.duration,
+                                 caption_band=band)
+
+    def resize_stage(self, media_id: str, settings: ResizeSettings | None = None) -> tuple[dict, tuple[int, int], list[str]]:
+        """``(stage, canvas size, notes)`` for the render pipeline."""
+        item = self.media(media_id)
+        s = settings or self.resize_settings(media_id)
+        layout = self.resize_layout(media_id, s)
+        canvas = (layout.out_w, layout.out_h)
+        meta = item.metadata
+        if s.mode == "reframe":
+            path = self.reframe_path_for(media_id, *canvas, s.burn_captions)
+            stage = {"type": "reframe", "src_w": path.src_w, "src_h": path.src_h, "crop_w": path.crop_w,
+                     "crop_h": path.crop_h, "keyframes": path.keyframes(), "out_w": canvas[0], "out_h": canvas[1],
+                     "fps": meta.fps, "duration": meta.duration}
+            return stage, canvas, list(path.warnings)
+        return {"type": "layout", "layout": layout.to_dict()}, canvas, layout_notes(
+            layout, meta.display_width, meta.display_height)
+
+    def submit_resize_export(self, media_id: str, output: str, output_settings: OutputSettings,
+                             overwrite: bool = False) -> Job:
+        s = self.resize_settings(media_id)
+        stage, canvas, _notes = self.resize_stage(media_id, s)
+        return self.submit_render(media_id, output, output_settings, use_cuts=s.use_cuts,
+                                  burn_captions=s.burn_captions, stage=stage, canvas=canvas, overwrite=overwrite,
+                                  title=f"Export {canvas[0]}x{canvas[1]}: {Path(output).name}")
+
+    def submit_resize_frame(self, media_id: str, at_seconds: float) -> Job:
+        """Render the output frame at a source time exactly as the export would."""
+        item = self.media(media_id)
+        s = self.resize_settings(media_id)
+        stage, canvas, _notes = self.resize_stage(media_id, s)
+        ass = None
+        if s.burn_captions and item.captions and item.captions.segments:
+            ass = build_ass(item.captions.segments, item.effective_caption_style, *canvas, title=item.name)
+        payload = {"path": item.path, "media_id": media_id, "at": at_seconds, "stage": stage, "ass": ass}
+        return self.services.jobs.submit(RENDER_FRAME_JOB, f"Resize frame preview: {item.name}", payload,
                                          project_id=self.project.id)

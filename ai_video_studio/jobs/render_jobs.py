@@ -15,14 +15,16 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
+from ai_video_studio.core import paths
 from ai_video_studio.core.errors import MediaError, StudioError
 from ai_video_studio.core.fs import remove_tree
-from ai_video_studio.core.process import run_streaming
+from ai_video_studio.core.process import run_process, run_streaming
 from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir
 from ai_video_studio.jobs.encode import encode_with_fallback, ffmpeg_error, partial_path
 from ai_video_studio.jobs.manager import JobContext
@@ -43,6 +45,7 @@ log = logging.getLogger(__name__)
 
 SMARTCUT_ANALYZE_JOB = "smartcut_analyze"
 RENDER_JOB = "render_video"
+RENDER_FRAME_JOB = "render_frame_preview"
 
 _writing: set[str] = set()
 _writing_lock = threading.Lock()
@@ -143,6 +146,37 @@ def make_render_handler(get_ffmpeg: Callable[[], Path]):
         return {"media_id": p.get("media_id"), "output": str(output), "encoder": codec,
                 "warnings": warnings + notes, "duration": out_duration, "segments": len(ranges or []) or 1,
                 "batch_id": p.get("batch_id"), "batch_item": p.get("batch_item")}
+
+    return handle
+
+
+def make_render_frame_handler(get_ffmpeg: Callable[[], Path]):
+    """Render one output frame exactly as the export would (stage + subtitles), on the source timeline."""
+
+    def handle(job: Job, ctx: JobContext) -> dict:
+        p = job.payload
+        folder = job_temp_dir(job)
+        output = paths.temp_dir() / f"frame-preview-{job.id}.png"
+        try:
+            stage = stage_from_payload(p.get("stage"), folder, None)
+            subtitle_file = None
+            if p.get("ass"):
+                subtitle_file = SUBTITLE_FILE
+                (folder / subtitle_file).write_text(p["ass"], encoding="utf-8")
+            graph, _v, _a = build_filter_graph(keep_ranges=None, has_audio=False, video_stage=stage,
+                                               subtitle_file=subtitle_file)
+            args = [str(get_ffmpeg()), "-hide_banner", "-nostdin", "-y", "-i", str(p["path"]),
+                    "-ss", f"{max(0.0, float(p['at'])):.3f}", "-filter_complex", graph, "-map", "[vout]",
+                    "-frames:v", "1", str(output)]
+            try:
+                result = run_process(args, timeout=120, cancel_event=ctx.cancel_event, cwd=str(folder))
+            except subprocess.TimeoutExpired as exc:
+                raise StudioError("Preview render timed out.") from exc
+            if result.returncode != 0 or not output.is_file():
+                raise StudioError(f"Preview render failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
+        finally:
+            remove_tree(folder)
+        return {"media_id": p.get("media_id"), "image": str(output), "at": p["at"]}
 
     return handle
 

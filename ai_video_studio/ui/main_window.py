@@ -32,6 +32,7 @@ from ai_video_studio.ui.pages.media import MediaPage, video_file_filter
 from ai_video_studio.ui.pages.planned import PlannedPage
 from ai_video_studio.ui.pages.queue import QueuePage
 from ai_video_studio.ui.pages.reframe import ReframePage
+from ai_video_studio.ui.pages.resize import ResizePage
 from ai_video_studio.ui.pages.settings_page import SettingsPage
 from ai_video_studio.ui.pages.smart_cut import SmartCutPage
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         self.captions_page = CaptionsPage(self.controller, self.bridge)
         self.reframe_page = ReframePage(self.controller, self.bridge)
         self.smart_cut_page = SmartCutPage(self.controller, self.bridge)
+        self.resize_page = ResizePage(self.controller, self.bridge)
         self.queue_page = QueuePage(services, self.bridge)
         self.settings_page = SettingsPage(services, on_tools_changed=self._on_tools_changed)
         built = {
@@ -92,6 +94,7 @@ class MainWindow(QMainWindow):
             "Captions": self.captions_page,
             "Auto Reframe": self.reframe_page,
             "Smart Cut": self.smart_cut_page,
+            "Resize & Crop": self.resize_page,
             "Export Queue": self.queue_page,
             "Settings": self.settings_page,
         }
@@ -170,7 +173,7 @@ class MainWindow(QMainWindow):
 
     def player_pages(self) -> list:
         """Pages with a video player; playback stops when they are left or the project closes."""
-        return [self.edit_page, self.captions_page, self.reframe_page, self.smart_cut_page]
+        return [self.edit_page, self.captions_page, self.reframe_page, self.smart_cut_page, self.resize_page]
 
     def _open_in_editor(self, media_id: str) -> None:
         self.navigate("Edit")
@@ -322,4 +325,5 @@ class MainWindow(QMainWindow):
         self.captions_page.stop_playback()
         self.reframe_page.shutdown()
         self.smart_cut_page.shutdown()
+        self.resize_page.shutdown()
         event.accept()
