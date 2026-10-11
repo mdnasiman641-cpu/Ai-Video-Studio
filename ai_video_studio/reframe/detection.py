@@ -129,7 +129,13 @@ class YuNetFaceDetector:
         _ok, faces = self._detector.detect(frame)
         if faces is None:
             return []
-        return [_normalised(f[0], f[1], f[2], f[3], w, h, float(f[-1]), "face") for f in faces]
+        result = []
+        for f in faces:
+            det = _normalised(f[0], f[1], f[2], f[3], w, h, float(f[-1]), "face")
+            # Columns 4-13: right eye, left eye, nose tip, right and left mouth corner (x, y).
+            points = tuple(float(f[4 + i]) / (w if i % 2 == 0 else h) for i in range(10))
+            result.append(Detection(det.x, det.y, det.w, det.h, det.confidence, "face", landmarks=points))
+        return result
 
 
 class HaarFaceDetector:
@@ -137,9 +143,10 @@ class HaarFaceDetector:
 
     name = "Haar cascade face detector (fallback)"
 
-    def __init__(self):
+    def __init__(self, min_confidence: float = 0.0):
         cv2 = load_cv2()
         self._cv2 = cv2
+        self.min_confidence = min_confidence
         self._cascade = cv2.CascadeClassifier(str(Path(cv2.data.haarcascades) / HAAR_FILE))
         if self._cascade.empty():
             raise DependencyMissingError("OpenCV's bundled face cascade could not be loaded.")
@@ -153,7 +160,8 @@ class HaarFaceDetector:
         result = []
         for (x, y, bw, bh), weight in zip(boxes, weights):
             confidence = max(0.0, min(1.0, float(weight) / 8.0))
-            result.append(_normalised(x, y, bw, bh, w, h, confidence, "face"))
+            if confidence >= self.min_confidence:
+                result.append(_normalised(x, y, bw, bh, w, h, confidence, "face"))
         return result
 
 
@@ -162,8 +170,9 @@ class HogPersonDetector:
 
     name = "HOG person detector"
 
-    def __init__(self):
+    def __init__(self, min_confidence: float = 0.25):
         cv2 = load_cv2()
+        self.min_confidence = min_confidence
         self._hog = cv2.HOGDescriptor()
         self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
@@ -175,7 +184,7 @@ class HogPersonDetector:
         result = []
         for (x, y, bw, bh), weight in zip(boxes, weights):
             confidence = max(0.0, min(1.0, float(weight) / 2.0))
-            if confidence >= 0.25:
+            if confidence >= self.min_confidence:
                 result.append(_normalised(x, y, bw, bh, w, h, confidence, "person"))
         return result
 
@@ -203,24 +212,63 @@ class DetectorSet:
 
 
 def build_detectors(models_dir: Path, detect_persons: bool, allow_download: bool = True,
-                    opener: Opener | None = None) -> DetectorSet:
+                    opener: Opener | None = None, min_confidence: float = FACE_SCORE_THRESHOLD) -> DetectorSet:
+    """Face detector (YuNet, or Haar as fallback) and optional person detector.
+
+    ``min_confidence`` is the lowest detection score kept. Haar has no landmarks, so mouth
+    movement (active-speaker mode) is only available with YuNet.
+    """
     load_cv2()
     warnings: list[str] = []
     model = ensure_face_model(models_dir, download=allow_download, opener=opener)
     face: FrameDetector
     if model is not None:
         try:
-            face = YuNetFaceDetector(model)
+            face = YuNetFaceDetector(model, score_threshold=min_confidence)
         except Exception as exc:  # noqa: BLE001 - e.g. an OpenCV build without the DNN module
             log.warning("YuNet face detector could not be created", extra={"error": str(exc)})
-            face = HaarFaceDetector()
+            face = HaarFaceDetector()  # its score is not comparable with YuNet's
             warnings.append(f"The YuNet face detector could not be started ({exc}); using the less accurate "
                             f"Haar cascade instead.")
     else:
-        face = HaarFaceDetector()
+        face = HaarFaceDetector()  # its score is not comparable with YuNet's
         warnings.append("The YuNet face model could not be downloaded, so the less accurate Haar cascade "
                         "(frontal faces only) is used. Connect to the internet and analyse again for better "
                         "results.")
-    person = HogPersonDetector() if detect_persons else None
+    person = HogPersonDetector(max(0.25, min_confidence - 0.3)) if detect_persons else None
     names = [face.name] + ([person.name] if person else [])
     return DetectorSet(face, person, " + ".join(names) + " (OpenCV, CPU)", warnings)
+
+
+APPEARANCE_BINS = (8, 4)  # hue x saturation bins per region
+
+
+def appearance_descriptor(frame, det: Detection) -> tuple[float, ...] | None:
+    """Colour histogram of the subject (identity evidence that survives small movements).
+
+    For a face: the face box plus the area below it (neck, clothes), which separates people
+    much better than the face alone. For a full body: the upper half of the box. The result is
+    normalised so two descriptors can be compared by histogram intersection (0..1).
+    """
+    cv2 = load_cv2()
+    h, w = frame.shape[:2]
+    x0, y0, bw, bh = det.x * w, det.y * h, det.w * w, det.h * h
+    if det.kind == "person":
+        regions = [(x0, y0, bw, bh * 0.5)]
+    else:
+        regions = [(x0, y0, bw, bh), (x0 - bw * 0.5, y0 + bh * 1.2, bw * 2.0, bh * 1.2)]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    values: list[float] = []
+    for rx, ry, rw, rh in regions:
+        x1, y1 = int(max(0, rx)), int(max(0, ry))
+        x2, y2 = int(min(w, rx + rw)), int(min(h, ry + rh))
+        bins = APPEARANCE_BINS[0] * APPEARANCE_BINS[1]
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            values += [0.0] * bins
+            continue
+        hist = cv2.calcHist([hsv[y1:y2, x1:x2]], [0, 1], None, list(APPEARANCE_BINS), [0, 180, 0, 256])
+        values += [float(v) for v in hist.flatten()]
+    total = sum(values)
+    if total <= 0:
+        return None
+    return tuple(v / total for v in values)

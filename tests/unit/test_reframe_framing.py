@@ -11,7 +11,8 @@ from ai_video_studio.reframe.framing import (
     output_size_options,
     resolve_output_size,
 )
-from ai_video_studio.reframe.model import ReframeError, ReframeSettings
+from ai_video_studio.reframe.model import Detection, ReframeError, ReframeSettings
+from ai_video_studio.reframe.tracker import IouTracker
 from tests.reframe_helpers import face_at, make_analysis, make_track
 
 W, H = 1920, 1080
@@ -76,17 +77,17 @@ def test_output_sizes():
 
 # -- centre crop ------------------------------------------------------------------------------------
 def test_center_mode_is_static_and_needs_no_analysis():
-    path = compute_crop_path(None, ReframeSettings(mode="center"), W, H, 5.0)
+    path = compute_crop_path(None, ReframeSettings(tracking_mode="center"), W, H, 5.0)
     assert path.is_static and path.at(0) == path.at(4.9) == ((W - 608) // 2, 0)
     assert set(path.states) == {"center"}
 
 
 def test_center_mode_offset_moves_and_is_clamped_to_the_frame():
-    path = compute_crop_path(None, ReframeSettings(mode="center", offset_x=0.5), W, H, 2.0)
+    path = compute_crop_path(None, ReframeSettings(tracking_mode="center", offset_x=0.5), W, H, 2.0)
     assert path.at(1) == (656 + 304, 0)  # half a crop width to the right
-    path = compute_crop_path(None, ReframeSettings(mode="center", preset="1:1", offset_x=0.5), W, H, 2.0)
+    path = compute_crop_path(None, ReframeSettings(tracking_mode="center", preset="1:1", offset_x=0.5), W, H, 2.0)
     assert path.at(1)[0] == W - path.crop_w  # would leave the frame: clamped
-    path = compute_crop_path(None, ReframeSettings(mode="center", preset="16:9", offset_x=-0.5, offset_y=0.3),
+    path = compute_crop_path(None, ReframeSettings(tracking_mode="center", preset="16:9", offset_x=-0.5, offset_y=0.3),
                              W, H, 2.0)
     assert path.at(1) == (0, 0)  # the crop is the whole frame, so it cannot move
 
@@ -215,17 +216,36 @@ def test_subject_change_is_a_controlled_transition():
     assert path.followed_at(4) == 1 and path.followed_at(7) == 2
 
 
-def test_reappearing_subject_is_continued_but_not_ambiguous_ones():
-    first = make_track(1, "face", lambda t: (600, 500, 120, 144) if t <= 3 else None, 10)
-    again = make_track(2, "face", lambda t: (640, 510, 120, 144) if t >= 3.6 else None, 10)
-    other = make_track(3, "face", face_at(1600, 500), 10)
-    path = compute_crop_path(make_analysis([first, again, other]), settings(target=1), W, H, 10.0)
-    assert path.followed_at(8) == 2 and abs(centre_x(path, 8) - 640) <= 1
+def _tracked(frames, duration, fps=5.0):
+    """Run detections through the real tracker (with re-linking), like the analysis does."""
+    tracker = IouTracker(aspect=W / H, max_missed_seconds=1.5)
+    for i, dets in enumerate(frames):
+        tracker.update(i / fps, dets)
+    return make_analysis(tracker.finish(), duration=duration)
 
-    twin = make_track(4, "face", lambda t: (700, 520, 120, 144) if t >= 3.4 else None, 10)
-    path = compute_crop_path(make_analysis([first, again, twin, other]), settings(target=1, hold_seconds=0.5),
-                             W, H, 10.0)
-    assert path.state_at(8) == "lost"  # two candidates near the old position: do not guess
+
+def _det(cx, cy, size=120):
+    return Detection((cx - size / 2) / W, (cy - size * 0.6) / H, size / W, size * 1.2 / H, 0.9, "face")
+
+
+def test_reappearing_subject_is_continued_but_not_ambiguous_ones():
+    frames = [[_det(600, 500)] if i <= 15 or i >= 18 else [] for i in range(50)]  # 0.4 s gap: same track
+    frames = [[_det(600, 500)] if i <= 15 else [_det(640, 510)] if i >= 28 else [] for i in range(50)]  # 2.4 s gap
+    for f in frames:
+        f.append(_det(1600, 500))
+    analysis = _tracked(frames, 10.0)
+    subject = [t for t in analysis.tracks if t.samples[0].cx * W < 1000]
+    assert len(subject) == 1  # re-linked after the gap: one ID
+    path = compute_crop_path(analysis, settings(tracking_mode="manual", target=subject[0].id), W, H, 10.0)
+    assert path.followed_at(8) == subject[0].id and abs(centre_x(path, 8) - 640) <= 1
+
+    ambiguous = [[_det(600, 500)] if i <= 15 else [_det(640, 510), _det(560, 520)] if i >= 28 else []
+                 for i in range(50)]
+    analysis = _tracked(ambiguous, 10.0)
+    first = analysis.tracks[0]
+    assert first.end < 4  # two candidates near the old position: not re-linked to either
+    path = compute_crop_path(analysis, settings(tracking_mode="manual", target=first.id, hold_seconds=0.5), W, H, 10.0)
+    assert path.state_at(8) == "lost"
 
 
 def test_caption_safe_area_keeps_face_above_bottom_captions():
@@ -246,7 +266,8 @@ def test_caption_safe_area_keeps_face_above_bottom_captions():
 
 def test_person_detections_frame_the_upper_body():
     body = make_track(1, "person", lambda t: (800, 600, 200, 800), 5)
-    path = compute_crop_path(make_analysis([body], duration=5), settings(preset="16:9", zoom=2.0, subject_y=0.5),
+    path = compute_crop_path(make_analysis([body], duration=5), settings(preset="16:9", zoom=2.0, subject_y=0.5,
+                                                                      tracking_mode="auto_visible"),
                              W, H, 5.0)
     _x, y = path.at(2)
     anchor_centre = 600 - 400 + 0.2 * 800  # top of the box + half of its upper 40 %

@@ -23,7 +23,9 @@ PROJECT_FORMAT = "ai-video-studio-project"
 #   1 - Phase 1: media list with metadata
 #   2 - Phase 2: per-media "captions" (CaptionTrack) and "caption_style" (optional keys)
 #   3 - Phase 3: per-media "reframe" (settings + cached tracking analysis, optional key)
-PROJECT_VERSION = 3
+#   4 - Phase 3 upgrade: reframe "tracking_mode" (replaces "mode") and new tracking options;
+#       analyses may contain speech, mouth movement and appearance data
+PROJECT_VERSION = 4
 
 
 @dataclass

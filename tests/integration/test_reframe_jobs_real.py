@@ -174,7 +174,7 @@ def test_export_with_captions_and_without_audio(manager, clip, tmp_path):
 
 
 def test_centre_crop_export_has_no_moving_crop(manager, clip, tmp_path):
-    _path, payload = export_payload(clip, None, tmp_path, "centre.mp4", settings=ReframeSettings(mode="center"))
+    _path, payload = export_payload(clip, None, tmp_path, "centre.mp4", settings=ReframeSettings(tracking_mode="center"))
     job = run_job(manager, REFRAME_EXPORT_JOB, payload)
     assert job.state is JobState.COMPLETED, job.error
     assert job.result["moving_crop"] is False
@@ -242,7 +242,7 @@ def test_analysis_and_export_can_be_cancelled(db, tmp_path):
         assert manager.store.get(job.id).state is JobState.CANCELLED
 
         started.clear()
-        settings = ReframeSettings(mode="center", preset="9:16")
+        settings = ReframeSettings(tracking_mode="center", preset="9:16")
         path = compute_crop_path(None, settings, 1280, 720, 60)
         out = tmp_path / "cancelled.mp4"
         payload = {"path": str(long_clip), "output": str(out), "src_w": 1280, "src_h": 720, "crop_w": path.crop_w,

@@ -112,3 +112,76 @@ def test_haar_fallback_finds_the_face_without_the_model(assets, tmp_path):
     best = max(analysis.tracks, key=lambda t: len(t.samples))
     print(f"\n[real haar] tracks={[(t.id, len(t.samples)) for t in analysis.tracks]}")
     assert analysis.coverage(best) > 0.7
+
+
+# -- active speaker on synthetic audio-visual clips (real detector, real mouth measure, real VAD) ------
+# These clips are generated (tests/av_fixtures.py): a real face photo with a drawn mouth opened in
+# time with real recorded speech. They check the whole pipeline with a known ground truth; they are
+# not a validation of active-speaker detection on real conversations.
+def av_analysis(assets, tmp_path, name, timeline, duration, extra_audio=None):
+    pytest.importorskip("faster_whisper")
+    if not (assets / YUNET_FILE).is_file():
+        pytest.skip("YuNet model not in AVS_TEST_REFRAME_ASSETS")
+    from ai_video_studio.core.ffmpeg_tools import find_tool
+    from ai_video_studio.jobs.manager import JobManager
+    from ai_video_studio.jobs.models import JobState
+    from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, make_reframe_analyze_handler
+    from ai_video_studio.jobs.store import JobStore
+    from ai_video_studio.reframe.model import TrackingAnalysis
+    from ai_video_studio.storage.database import Database
+    from tests.av_fixtures import build_av_clip
+
+    clip = build_av_clip(tmp_path / f"{name}.mp4", IMAGE, timeline, duration, extra_audio=extra_audio)
+    settings = ReframeSettings(tracking_mode="active_speaker")
+    db = Database(tmp_path / "jobs.db")
+    manager = JobManager(JobStore(db), 1)
+    manager.register(REFRAME_ANALYZE_JOB, make_reframe_analyze_handler(lambda: find_tool("ffmpeg")))
+    try:
+        job = manager.submit(REFRAME_ANALYZE_JOB, "av", {
+            "path": str(clip), "width": 1280, "height": 720, "duration": duration,
+            "sample_fps": settings.analysis_rate(), "features": settings.analysis_features(),
+            "face_threshold": settings.confidence_threshold, "models_dir": str(assets)})
+        assert manager.wait_idle(300)
+        job = manager.store.get(job.id)
+    finally:
+        manager.shutdown()
+        db.close()
+    assert job.state is JobState.COMPLETED, job.error
+    analysis = TrackingAnalysis.from_dict(job.result["analysis"])
+    assert {"faces", "mouth", "speech"} <= set(analysis.features)
+    return analysis
+
+
+def faces_by_side(analysis):
+    faces = sorted((t for t in analysis.tracks if t.kind == "face"), key=lambda t: t.samples[0].cx)
+    assert len(faces) == 2, [(t.id, len(t.samples)) for t in analysis.tracks]
+    return faces
+
+
+def test_active_speaker_follows_the_talking_person_and_switches(assets, tmp_path):
+    analysis = av_analysis(assets, tmp_path, "switch", [(0.5, "A"), (7.7, "B")], 14.5)
+    left, right = faces_by_side(analysis)
+    path = compute_crop_path(analysis, ReframeSettings(tracking_mode="active_speaker", caption_safe="off"),
+                             W, H, 14.5)
+    seen = [(t, path.followed_at(t)) for t in (2, 4, 6, 7.3, 10, 12, 14)]
+    print(f"\n[real av/switch] followed={seen} scores={[path.speaker_score_at(t) for t in (4, 12)]}")
+    assert all(path.followed_at(t) == left.id for t in (2, 4, 6))
+    assert path.followed_at(7.3) == left.id       # pause: no switch during silence
+    assert all(path.followed_at(t) == right.id for t in (10, 12, 14))
+
+
+def test_active_speaker_off_screen_voice_is_not_attributed(assets, tmp_path):
+    analysis = av_analysis(assets, tmp_path, "offscreen", [(0.5, None)], 7.0)
+    path = compute_crop_path(analysis, ReframeSettings(tracking_mode="active_speaker", caption_safe="off"),
+                             W, H, 7.0)
+    print(f"\n[real av/off-screen] followed={sorted(set(path.followed), key=str)} states={sorted(set(path.states))}")
+    assert set(path.followed) == {None}
+
+
+def test_active_speaker_ignores_a_steady_tone(assets, tmp_path):
+    analysis = av_analysis(assets, tmp_path, "tone", [], 6.0,
+                           extra_audio="sine=frequency=330:sample_rate=48000,volume=0.3")
+    assert not analysis.speech.segments(0.5)
+    path = compute_crop_path(analysis, ReframeSettings(tracking_mode="active_speaker", caption_safe="off"),
+                             W, H, 6.0)
+    assert set(path.followed) == {None}

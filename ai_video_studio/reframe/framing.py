@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import bisect
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ai_video_studio.reframe.model import ReframeError, ReframeSettings, Track, TrackingAnalysis, TrackSample
 
@@ -46,7 +46,7 @@ OUTPUT_SIZES: dict[str, list[tuple[int, int]]] = {
     "4:5": [(1080, 1350), (864, 1080)],
 }
 PATH_RATE = 10.0  # crop keyframes per second (interpolated per output frame at export)
-FACE_BONUS = 1.5  # automatic subject choice prefers faces over full-body detections
+FACE_BONUS = 1.3  # automatic subject choice prefers faces over full-body detections
 
 
 def even(value: float) -> int:
@@ -97,10 +97,11 @@ def resolve_output_size(settings: ReframeSettings, src_w: int, src_h: int) -> tu
 
 
 def anchor_region(kind: str, x: float, y: float, w: float, h: float) -> tuple[float, float, float, float]:
-    """The part of a detection that framing protects: the face, or the top of a full body."""
+    """The part of a detection that framing protects: the face with chin and neck (the start of
+    the upper body), or the top of a full body."""
     if kind == "person":
         return x, y, w, h * 0.4
-    return x, y, w, h
+    return x, y, w, h * 1.35
 
 
 def _smoothstep(p: float) -> float:
@@ -110,7 +111,11 @@ def _smoothstep(p: float) -> float:
 
 @dataclass
 class CropPath:
-    """Crop rectangle over time. ``xs``/``ys`` are top-left corners in source pixels."""
+    """Crop rectangle over time. ``xs``/``ys`` are top-left corners in source pixels.
+
+    Preview and export both use this object (the export payload stores its keyframes), so
+    they always show the same framing.
+    """
 
     src_w: int
     src_h: int
@@ -119,9 +124,14 @@ class CropPath:
     times: list[float]
     xs: list[float]
     ys: list[float]
-    states: list[str] = field(default_factory=list)       # tracked | held | lost | center
+    states: list[str] = field(default_factory=list)       # tracked | held | lost | silence | center
     followed: list[int | None] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    speech: list[float | None] = field(default_factory=list)          # speech share around each keyframe
+    speaker_score: list[float | None] = field(default_factory=list)   # evidence of the followed speaker
+    upscale: float = 1.0
+    zoom_used: float = 1.0
 
     def _index(self, t: float) -> tuple[int, float]:
         i = bisect.bisect_right(self.times, t) - 1
@@ -130,6 +140,12 @@ class CropPath:
             k = (t - self.times[i]) / (self.times[i + 1] - self.times[i])
             return i, max(0.0, min(1.0, k))
         return i, 0.0
+
+    def _nearest(self, values: list, t: float, default=None):
+        if not values:
+            return default
+        i, k = self._index(t)
+        return values[i + (1 if k >= 0.5 and i + 1 < len(values) else 0)]
 
     def at(self, t: float) -> tuple[int, int]:
         """Top-left corner at time ``t`` (linear interpolation), always inside the frame."""
@@ -143,14 +159,16 @@ class CropPath:
         return x, y
 
     def state_at(self, t: float) -> str:
-        i, k = self._index(t)
-        return self.states[i + (1 if k >= 0.5 and i + 1 < len(self.states) else 0)] if self.states else "center"
+        return self._nearest(self.states, t, "center")
 
     def followed_at(self, t: float) -> int | None:
-        i, k = self._index(t)
-        if not self.followed:
-            return None
-        return self.followed[i + (1 if k >= 0.5 and i + 1 < len(self.followed) else 0)]
+        return self._nearest(self.followed, t)
+
+    def speech_at(self, t: float) -> float | None:
+        return self._nearest(self.speech, t)
+
+    def speaker_score_at(self, t: float) -> float | None:
+        return self._nearest(self.speaker_score, t)
 
     @property
     def tracked_fraction(self) -> float:
@@ -174,90 +192,229 @@ class CropPath:
 
 
 def auto_target_score(analysis: TrackingAnalysis, track: Track) -> float:
+    """How suitable a track is as the main subject: time on screen x detection reliability x
+    confidence, with faces preferred. Size only breaks ties, so a large face of someone passing
+    close to the camera does not win over the person the video is about."""
     bonus = FACE_BONUS if track.kind == "face" else 1.0
-    return analysis.coverage(track) * track.mean_confidence * math.sqrt(track.mean_area) * bonus
+    presence = analysis.screen_share(track) * max(analysis.duration, 1e-6)
+    return presence * analysis.detection_rate(track) * track.mean_confidence * bonus + 1e-3 * math.sqrt(track.mean_area)
 
 
-def suitable_subjects(analysis: TrackingAnalysis, min_coverage: float = 0.05) -> list[Track]:
-    """Tracks worth offering to the user, best first."""
-    tracks = [t for t in analysis.tracks if analysis.coverage(t) >= min_coverage] or list(analysis.tracks)
-    return sorted(tracks, key=lambda t: auto_target_score(analysis, t), reverse=True)
+def suitable_subjects(analysis: TrackingAnalysis) -> list[Track]:
+    """Tracks to offer to the user, best first."""
+    return sorted(analysis.tracks, key=lambda t: auto_target_score(analysis, t), reverse=True)
 
 
-class _SubjectResolver:
-    """Decides which track is followed at each time and returns its box."""
+def caption_band_from_style(style) -> tuple[str, float] | None:
+    """``(position, height fraction)`` of the output covered by captions in ``style``
+    (a ``CaptionStyle``). Caption sizes scale with the output height, so the fraction is the
+    same for every output size. ``None`` for captions in the middle (no band to keep clear)."""
+    if style.vertical not in ("bottom", "top"):
+        return None
+    lines_px = style.max_lines * style.font_size * 1.2 + 2 * style.outline_width
+    if style.background:
+        lines_px += 2 * style.background_padding
+    fraction = style.margin_v / 100 + lines_px / 1080 + 0.02
+    return style.vertical, min(0.5, max(0.05, fraction))
 
-    REACQUIRE_SECONDS = 3.0      # how long after losing a subject a new track may continue it
-    REACQUIRE_DISTANCE = 0.25    # max distance (fraction of frame width) between old and new track
+
+def filter_by_confidence(analysis: TrackingAnalysis, threshold: float) -> TrackingAnalysis:
+    """A view of ``analysis`` without detections below ``threshold`` (tracks left with fewer
+    than two detections are dropped)."""
+    if threshold <= analysis.face_threshold + 1e-9:
+        return analysis
+    tracks = []
+    for track in analysis.tracks:
+        samples = [s for s in track.samples if s.confidence >= threshold]
+        if len(samples) >= 2:
+            tracks.append(Track(track.id, track.kind, samples, track.appearance))
+    return replace(analysis, tracks=tracks)
+
+
+@dataclass
+class _Decision:
+    track: Track | None
+    box: TrackSample | None
+    state: str                 # tracked | held | lost | silence
+    changed: bool = False      # a different subject is followed from here
+    speech: float | None = None
+    score: float | None = None
+
+
+class _Resolver:
+    """Decides, for each keyframe, whom to follow according to the tracking mode."""
 
     def __init__(self, analysis: TrackingAnalysis, settings: ReframeSettings):
         self.analysis = analysis
         self.settings = settings
-        self.schedule = settings.subject_schedule()
+        self.mode = settings.tracking_mode
         self.tolerance = analysis.sample_interval * 0.75
         self.max_gap = max(settings.hold_seconds, 2.5 * analysis.sample_interval)
-        self.current: Track | None = None
-        self.segment = -1
-        self._continuations: dict[int, Track | None] = {}
+        if self.mode in ("auto_face", "active_speaker"):
+            self.kinds = {"face"}
+        elif self.mode == "speech_audio":
+            self.kinds = {"face"} if any(t.kind == "face" for t in analysis.tracks) else {"person"}
+        else:
+            self.kinds = {"face", "person"}
+        self.candidates = [t for t in analysis.tracks if t.kind in self.kinds]
+        self._rank = {t.id: auto_target_score(analysis, t) for t in self.candidates}
 
-    def _box(self, track: Track | None, t: float) -> TrackSample | None:
+    def box(self, track: Track | None, t: float) -> TrackSample | None:
         return track.box_at(t, self.tolerance, self.max_gap) if track is not None else None
 
-    def _best_visible(self, t: float) -> Track | None:
-        visible = [tr for tr in self.analysis.tracks if self._box(tr, t) is not None]
-        if not visible:
+    def visible(self, t: float) -> list[tuple[Track, TrackSample]]:
+        out = []
+        for track in self.candidates:
+            b = self.box(track, t)
+            if b is not None:
+                out.append((track, b))
+        return out
+
+    def best(self, tracks) -> Track | None:
+        tracks = list(tracks)
+        return max(tracks, key=lambda tr: self._rank[tr.id]) if tracks else None
+
+    # -- subject modes: manual / auto_face / auto_visible -----------------------------------------
+    def _wanted(self, track_id: int | None) -> Track | None:
+        if track_id is None:
+            if self.mode == "manual":
+                raise ReframeError("Manual Subject Tracking needs a subject: select one and click "
+                                   "Follow From Start.")
             return None
-        return max(visible, key=lambda tr: auto_target_score(self.analysis, tr))
+        track = self.analysis.track(track_id)
+        if track is None:
+            raise ReframeError(f"Subject #{track_id} is not in the tracking results. Analyse the video again "
+                               f"or choose another subject.")
+        if track.kind not in self.kinds:
+            raise ReframeError(f"Subject #{track_id} is a full-body detection; Auto Face Tracking follows faces. "
+                               f"Choose a face, or use Manual Subject Tracking.")
+        return track
 
-    def _continuation(self, lost: Track, t: float) -> Track | None:
-        """The new track that continues ``lost`` (reappearance), once it has started.
-
-        Candidates are tracks of the same kind that start within ``REACQUIRE_SECONDS``
-        after ``lost`` ends, near its last position. With two or more candidates it is
-        ambiguous who reappeared, so none is followed rather than risk jumping to a
-        different person.
-        """
-        if lost.id not in self._continuations:
-            last = lost.samples[-1]
-            candidates = [
-                tr for tr in self.analysis.tracks
-                if tr is not lost and tr.kind == lost.kind and last.t < tr.start <= last.t + self.REACQUIRE_SECONDS
-                and abs(tr.samples[0].cx - last.cx) <= self.REACQUIRE_DISTANCE
-                and abs(tr.samples[0].cy - last.cy) <= self.REACQUIRE_DISTANCE
-            ]
-            self._continuations[lost.id] = candidates[0] if len(candidates) == 1 else None
-        candidate = self._continuations[lost.id]
-        return candidate if candidate is not None and t >= candidate.start else None
-
-    def at(self, t: float) -> tuple[Track | None, TrackSample | None, bool]:
-        """``(track, box, changed)``; ``changed`` is True when a different subject is now followed."""
-        segment = max(i for i, (start, _tid) in enumerate(self.schedule) if start <= t + 1e-9)
-        previous = self.current
-        if segment != self.segment:
-            self.segment = segment
-            wanted = self.schedule[segment][1]
-            if wanted is None:
-                self.current = self._best_visible(t) or self.current
+    def subjects(self, times: list[float]) -> list[_Decision]:
+        schedule = self.settings.subject_schedule()
+        decisions = []
+        current: Track | None = None
+        automatic = False
+        segment = -1
+        last_seen: float | None = None
+        for t in times:
+            changed = False
+            seg = max(i for i, (start, _tid) in enumerate(schedule) if start <= t + 1e-9)
+            if seg != segment:
+                segment = seg
+                wanted = self._wanted(schedule[seg][1])
+                automatic = wanted is None
+                previous = current
+                if automatic:
+                    if self.mode == "auto_face":
+                        # Start with the best face on screen (by screen time and reliability, not
+                        # size) and stay with it; only if none is visible, wait for the best one.
+                        pool = [tr for tr in self.candidates if tr.end >= t] or self.candidates
+                        wanted = self.best(tr for tr, _b in self.visible(t)) or self.best(pool)
+                    else:
+                        wanted = self.best(tr for tr, _b in self.visible(t)) or current
+                current = wanted
+                changed = previous is not None and current is not previous
+            box = self.box(current, t)
+            if box is None and current is not None and automatic:
+                lost_for = t - (last_seen if last_seen is not None else t)
+                if lost_for > self.settings.hold_seconds or last_seen is None:
+                    replacement = None
+                    if self.mode == "auto_visible":
+                        replacement = self.best(tr for tr, _b in self.visible(t) if tr is not current)
+                    elif self.mode == "auto_face" and t > current.end:
+                        # The main face has left for good (re-linking found no continuation).
+                        replacement = self.best(tr for tr, _b in self.visible(t) if tr is not current)
+                    if replacement is not None:
+                        current, changed = replacement, True
+                        box = self.box(current, t)
+            if box is not None:
+                last_seen = t
+                decisions.append(_Decision(current, box, "tracked", changed))
+            elif last_seen is not None and t - last_seen <= self.settings.hold_seconds:
+                decisions.append(_Decision(current, None, "held", changed))
             else:
-                self.current = self.analysis.track(wanted)
-                if self.current is None:
-                    raise ReframeError(f"Subject #{wanted} is not in the tracking results. Analyse the video again "
-                                       f"or choose another subject.")
-        box = self._box(self.current, t)
-        if box is None and self.current is not None and t > self.current.end:
-            automatic = self.schedule[self.segment][1] is None
-            lost_for = t - self.current.end
-            replacement = self._continuation(self.current, t)
-            if replacement is None and automatic and lost_for > self.settings.hold_seconds:
-                replacement = self._best_visible(t)
-            if replacement is not None:
-                self.current = replacement
-                box = self._box(self.current, t)
-        if box is None and self.current is None:
-            self.current = self._best_visible(t) if self.schedule[self.segment][1] is None else None
-            box = self._box(self.current, t)
-        changed = previous is not None and self.current is not None and previous is not self.current
-        return self.current, box, changed
+                decisions.append(_Decision(current, None, "lost", changed))
+        return decisions
+
+    # -- active speaker ---------------------------------------------------------------------------
+    def active_speaker(self, times: list[float]) -> list[_Decision]:
+        from ai_video_studio.reframe.speaker import SpeakerEvidence
+
+        evidence = SpeakerEvidence(self.analysis, self.settings.speech_threshold)
+        decisions = []
+        current: Track | None = None
+        pending: int | None = None
+        pending_since = 0.0
+        confirmed_at: float | None = None
+        last_seen: float | None = None
+        for t in times:
+            visible = self.visible(t)
+            moment = evidence.moment(t, [tr for tr, _b in visible])
+            changed = False
+            if moment.state == "speaker":
+                if current is not None and moment.track_id == current.id:
+                    pending, confirmed_at = None, t
+                else:
+                    if pending != moment.track_id:
+                        pending, pending_since = moment.track_id, t
+                    need = self.settings.switch_seconds if current is not None else self.settings.switch_seconds / 2
+                    if t - pending_since >= need - 1e-9:
+                        previous = current
+                        current = self.analysis.track(pending)
+                        changed = previous is not None
+                        pending, confirmed_at = None, t
+            else:
+                pending = None
+                if moment.state == "silence" and current is not None:
+                    confirmed_at = t  # no switching during silence: the last speaker stays
+                elif (moment.state == "uncertain" and current is not None and confirmed_at is not None
+                      and t - confirmed_at > self.settings.speaker_hold_seconds):
+                    current = None  # nobody visible can be matched to the speech for too long
+            box = self.box(current, t)
+            score = moment.evidence.get(current.id) if current is not None else None
+            if box is not None:
+                last_seen = t
+                decisions.append(_Decision(current, box, "tracked", changed, moment.speech, score))
+            elif current is not None and last_seen is not None and t - last_seen <= self.settings.hold_seconds:
+                decisions.append(_Decision(current, None, "held", changed, moment.speech, score))
+            else:
+                decisions.append(_Decision(None, None, "lost", changed, moment.speech, None))
+        return decisions
+
+    # -- speech-audio-driven ----------------------------------------------------------------------
+    def speech_driven(self, times: list[float]) -> list[_Decision]:
+        speech = self.analysis.speech
+        decisions = []
+        current: Track | None = None
+        for t in times:
+            share = speech.speech_fraction(t - 0.25, t + 0.25, self.settings.speech_threshold)
+            if share < 0.5:
+                # Silence: hold the framing still (no change of subject without speech).
+                decisions.append(_Decision(current, None, "silence", False, share))
+                continue
+            visible = self.visible(t)
+            previous = current
+            if len(visible) == 1:
+                current = visible[0][0]
+            elif len(visible) > 1:
+                # Audio cannot tell which visible person speaks: keep the previous target (if the
+                # fallback is "hold" and they are still visible) rather than guess.
+                still = [tr for tr, _b in visible if tr is current]
+                current = still[0] if still and self.settings.fallback == "hold" else None
+            else:
+                current = None
+            box = self.box(current, t)
+            changed = previous is not None and current is not None and current is not previous
+            decisions.append(_Decision(current, box, "tracked" if box is not None else "lost", changed, share))
+        return decisions
+
+    def resolve(self, times: list[float]) -> list[_Decision]:
+        if self.mode == "active_speaker":
+            return self.active_speaker(times)
+        if self.mode == "speech_audio":
+            return self.speech_driven(times)
+        return self.subjects(times)
 
 
 def _ema(values: list[float], times: list[float], tau: float) -> list[float]:
@@ -287,6 +444,29 @@ def _ema(values: list[float], times: list[float], tau: float) -> list[float]:
     return smoothed[pad:pad + n]
 
 
+def effective_crop(settings: ReframeSettings, src_w: int, src_h: int) -> tuple[int, int, float, list[str], list[str]]:
+    """Crop size after applying the maximum upscale. Returns (w, h, zoom used, warnings, notes)."""
+    out_w, _out_h = resolve_output_size(settings, src_w, src_h)
+    full_w, _full_h = crop_size(src_w, src_h, settings.preset, 1.0)
+    warnings, notes = [], []
+    full_upscale = out_w / full_w
+    max_zoom = max(1.0, settings.max_upscale * full_w / out_w)
+    zoom = min(settings.zoom, max_zoom)
+    if zoom < settings.zoom - 1e-6:
+        notes.append(f"Zoom limited to {zoom:.2f}× so the crop is not enlarged more than "
+                     f"{settings.max_upscale:.2f}× (maximum upscale).")
+    if full_upscale > settings.max_upscale + 1e-6:
+        better = [s for s in output_size_options(settings.preset, src_w, src_h)
+                  if s[0] / full_w <= settings.max_upscale + 1e-6]
+        hint = (f" Choose {better[0][0]}×{better[0][1]} ({better[0][0] / full_w:.2f}×)" if better
+                else " No preset size stays within the limit")
+        warnings.append(f"The source is too small for this output: the {full_w}×{_full_h} crop is enlarged "
+                        f"{full_upscale:.2f}×, above the {settings.max_upscale:.2f}× limit, so the result will be "
+                        f"soft.{hint}, or raise the limit.")
+    cw, ch = crop_size(src_w, src_h, settings.preset, zoom)
+    return cw, ch, zoom, warnings, notes
+
+
 def compute_crop_path(
     analysis: TrackingAnalysis | None,
     settings: ReframeSettings,
@@ -294,9 +474,18 @@ def compute_crop_path(
     src_h: int,
     duration: float,
     rate: float = PATH_RATE,
+    caption_band: tuple[str, float] | None = None,
 ) -> CropPath:
+    """The crop over time for ``settings.tracking_mode``.
+
+    ``caption_band`` is the caption area of the output as ``(position, fraction)``, used when
+    ``settings.caption_safe`` is "auto" (derived from the caption style by the caller).
+    """
+    from ai_video_studio.reframe.model import reanalysis_reasons
+
     settings.validate()
-    cw, ch = crop_size(src_w, src_h, settings.preset, settings.zoom)
+    cw, ch, zoom_used, warnings, notes = effective_crop(settings, src_w, src_h)
+    out_w, _out_h = resolve_output_size(settings, src_w, src_h)
     max_x, max_y = src_w - cw, src_h - ch
     duration = max(0.0, duration)
     count = max(2, int(math.ceil(duration * rate)) + 1)
@@ -305,76 +494,107 @@ def compute_crop_path(
     def clamp(x: float, y: float) -> tuple[float, float]:
         return min(max(0.0, x), max_x), min(max(0.0, y), max_y)
 
+    def finish(path: CropPath) -> CropPath:
+        path.warnings = warnings + path.warnings
+        path.notes = notes + path.notes
+        path.upscale, path.zoom_used = out_w / cw, zoom_used
+        return path
+
     center = clamp(max_x / 2 + settings.offset_x * cw, max_y / 2 + settings.offset_y * ch)
-    if settings.mode == "center":
-        return CropPath(src_w, src_h, cw, ch, times, [center[0]] * count, [center[1]] * count,
-                        ["center"] * count, [None] * count)
+    if settings.tracking_mode == "center":
+        return finish(CropPath(src_w, src_h, cw, ch, times, [center[0]] * count, [center[1]] * count,
+                               ["center"] * count, [None] * count))
 
     if analysis is None:
         raise ReframeError("Analyse the video first, or choose Center crop.")
-    if not analysis.tracks:
+    reasons = reanalysis_reasons(analysis, settings)
+    if reasons:
+        raise ReframeError("Reanalysis required: " + " ".join(reasons))
+    analysis = filter_by_confidence(analysis, settings.confidence_threshold)
+    if not analysis.tracks and settings.tracking_mode != "speech_audio":
         raise ReframeError("No faces or people were detected in this video, so there is nothing to follow. "
                            "Choose Center crop to export without tracking.")
 
-    resolver = _SubjectResolver(analysis, settings)
+    band = None
+    if settings.caption_safe == "auto":
+        band = caption_band if settings.burn_captions else None
+    elif settings.caption_safe in ("bottom", "top"):
+        band = (settings.caption_safe, settings.caption_safe_height)
+
+    resolver = _Resolver(analysis, settings)
+    decisions = resolver.resolve(times)
     pad = settings.padding
     desired: list[tuple[float, float]] = []
     keep: list[tuple[float, float, float, float] | None] = []  # allowed range for x and y (lo_x, hi_x, lo_y, hi_y)
+    protected: list[tuple[float, float, float, float] | None] = []
     states: list[str] = []
-    followed: list[int | None] = []
     events: list[int] = []        # keyframe indices where a new continuous stretch starts
-    caption_conflicts = 0
-    last_desired = center
-    last_seen: float | None = None
+    last_desired: tuple[float, float] | None = None
 
-    for i, t in enumerate(times):
-        track, box, changed = resolver.at(t)
-        if box is not None:
-            kx, ky, kw, kh = anchor_region(track.kind, box.x * src_w, box.y * src_h, box.w * src_w, box.h * src_h)
-            ax = kx + kw / 2
-            ay = ky + kh / 2
+    def fallback_position(t: float) -> tuple[float, float]:
+        if settings.fallback == "hold" and last_desired is not None:
+            return last_desired
+        if settings.fallback == "group":
+            boxes = [b for _tr, b in resolver.visible(t)]
+            if boxes:
+                x0 = min(b.x for b in boxes) * src_w
+                x1 = max(b.x + b.w for b in boxes) * src_w
+                y0 = min(b.y for b in boxes) * src_h
+                y1 = max(b.y + b.h for b in boxes) * src_h
+                return clamp((x0 + x1) / 2 - cw / 2 + settings.offset_x * cw,
+                             y0 - settings.subject_y * ch + (y1 - y0) / 2 + settings.offset_y * ch)
+            if last_desired is not None:
+                return last_desired
+        return center
+
+    for i, (t, d) in enumerate(zip(times, decisions)):
+        box = d.box
+        if d.state == "tracked" and box is not None:
+            kind = d.track.kind
+            kx, ky, kw, kh = anchor_region(kind, box.x * src_w, box.y * src_h, box.w * src_w, box.h * src_h)
+            if kind == "person":
+                ax, ay = kx + kw / 2, ky + kh / 2
+            else:
+                ax, ay = (box.x + box.w / 2) * src_w, (box.y + box.h / 2) * src_h
             dx = ax - cw / 2 + settings.offset_x * cw
             dy = ay - settings.subject_y * ch + settings.offset_y * ch
             px, py = kw * pad, kh * pad
             lo_x, hi_x = kx + kw + px - cw, kx - px
             lo_y, hi_y = ky + kh + py - ch, ky - py
-            if settings.caption_safe != "off":
-                usable = (1 - settings.caption_safe_height) * ch
-                if settings.caption_safe == "bottom":
-                    need_lo = ky + kh + py - usable       # face bottom above the caption area
-                    if need_lo <= hi_y:
-                        dy = max(dy, need_lo)
-                        lo_y = max(lo_y, need_lo)
-                    else:
-                        caption_conflicts += 1
-                else:
-                    need_hi = ky - py - settings.caption_safe_height * ch  # face top below the caption area
-                    if need_hi >= lo_y:
-                        dy = min(dy, need_hi)
-                        hi_y = min(hi_y, need_hi)
-                    else:
-                        caption_conflicts += 1
-            state = "tracked"
             if lo_x > hi_x:  # subject wider than the crop: centre on it
                 lo_x = hi_x = ax - cw / 2
             if lo_y > hi_y:
                 lo_y = hi_y = ay - ch / 2
+            if band is not None:
+                # Soft preference (applied before smoothing, so it never makes the camera jump):
+                # move the crop so the face stays out of the caption band, within what keeps the
+                # face itself in frame.
+                usable = (1 - band[1]) * ch
+                if band[0] == "bottom":
+                    dy = max(dy, min(ky + kh + py - usable, hi_y))
+                else:
+                    dy = min(dy, max(ky - py - band[1] * ch, lo_y))
             target = clamp(dx, dy)
-            if states and states[-1] == "lost" or changed:
+            if (states and states[-1] in ("lost", "silence")) or d.changed:
                 events.append(i)
-            last_desired, last_seen = target, t
+            last_desired = target
             keep.append((lo_x, hi_x, lo_y, hi_y))
-        elif last_seen is not None and t - last_seen <= settings.hold_seconds:
-            state, target = "held", last_desired
+            protected.append((kx, ky, kw, kh))
+            state = "tracked"
+        elif d.state == "held" or d.state == "silence":
+            target = last_desired if last_desired is not None else center
             keep.append(None)
+            protected.append(None)
+            state = d.state
         else:
-            state, target = "lost", center
-            if states and states[-1] != "lost":
+            target = fallback_position(t)
+            if states and states[-1] not in ("lost",):
                 events.append(i)
             keep.append(None)
+            protected.append(None)
+            state = "lost"
         desired.append(target)
         states.append(state)
-        followed.append(track.id if track is not None and state != "lost" else None)
 
     # Zero-lag smoothing within each continuous stretch.
     tau = settings.smoothing * 1.2
@@ -385,8 +605,8 @@ def compute_crop_path(
         if a == b:
             continue
         seg_t = times[a:b]
-        smooth_x += _ema([d[0] for d in desired[a:b]], seg_t, tau)
-        smooth_y += _ema([d[1] for d in desired[a:b]], seg_t, tau)
+        smooth_x += _ema([p[0] for p in desired[a:b]], seg_t, tau)
+        smooth_y += _ema([p[1] for p in desired[a:b]], seg_t, tau)
 
     # Camera simulation: dead zone, speed limit, eased transitions, keep the subject in frame.
     xs, ys = [smooth_x[0]], [smooth_y[0]]
@@ -407,6 +627,8 @@ def compute_crop_path(
             if p >= 1:
                 transition = None
                 panning = [False, False]
+        elif states[i] == "silence":
+            pass  # speech-driven mode: the framing holds still while nobody speaks
         else:
             step_x, step_y = settings.follow_speed * cw * dt, settings.follow_speed * ch * dt
             moved = []
@@ -432,11 +654,36 @@ def compute_crop_path(
         xs.append(cx)
         ys.append(cy)
 
-    path = CropPath(src_w, src_h, cw, ch, times, xs, ys, states, followed)
+    path = CropPath(src_w, src_h, cw, ch, times, xs, ys, states, [d.track.id if d.track is not None and s != "lost"
+                                                                  else None for d, s in zip(decisions, states)],
+                    speech=[d.speech for d in decisions], speaker_score=[d.score for d in decisions])
     tracked = path.tracked_fraction
-    if tracked < 0.5:
-        path.warnings.append(f"The subject was found in only {tracked:.0%} of the video. Elsewhere the framing is "
-                             f"held or returns to the centre. Check the preview before exporting.")
-    if caption_conflicts:
-        path.warnings.append("At some moments the subject is too large to keep clear of the caption area.")
-    return path
+    if settings.tracking_mode in ("manual", "auto_face", "auto_visible") and tracked < 0.5:
+        path.warnings.append(f"The subject is in frame for only {tracked:.0%} of the video. Elsewhere the framing is "
+                             f"held or uses the fallback. Check the preview before exporting.")
+    if settings.tracking_mode == "active_speaker":
+        named = sum(1 for d in decisions if d.state == "tracked") / count
+        if named < 0.2:
+            path.warnings.append("A visible speaker could be identified for only "
+                                 f"{named:.0%} of the video (off-screen voice, no clear mouth movement, or "
+                                 f"overlapping speech). The rest uses the fallback.")
+    if settings.tracking_mode == "speech_audio" and not any(t.kind == "face" for t in analysis.tracks):
+        path.notes.append("No faces were found, so speech timing can only hold or move the fallback framing.")
+    if band is not None:
+        overlap = 0
+        tracked_frames = 0
+        for x, y, region, state in zip(xs, ys, protected, states):
+            if region is None or state != "tracked":
+                continue
+            tracked_frames += 1
+            _kx, ky, _kw, kh = region
+            top, bottom = y + (1 - band[1]) * ch, y + band[1] * ch
+            if (band[0] == "bottom" and ky + kh > top + 1) or (band[0] == "top" and ky < bottom - 1):
+                overlap += 1
+        if tracked_frames and overlap / tracked_frames > 0.05:
+            reason = (" The crop uses the full frame height, so it cannot move vertically."
+                      if ch >= src_h - 1 else "")
+            path.warnings.append(f"The face overlaps the caption area in {overlap / tracked_frames:.0%} of the tracked "
+                                 f"time.{reason} Move the captions to the other edge (Captions → Style) or zoom in "
+                                 f"slightly.")
+    return finish(path)

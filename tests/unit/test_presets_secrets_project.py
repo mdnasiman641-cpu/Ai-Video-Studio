@@ -78,7 +78,7 @@ def test_project_v2_captions_round_trip(tmp_path):
     item.caption_style = CaptionStyle(font_size=80, vertical="top")
     path = project.save(tmp_path / "p.avsproj")
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["version"] == PROJECT_VERSION == 3
+    assert data["version"] == PROJECT_VERSION == 4
     assert "বাংলা" in path.read_text(encoding="utf-8")  # stored as readable UTF-8
     loaded = Project.load(path).media[0]
     assert loaded.captions.to_dict() == item.captions.to_dict()

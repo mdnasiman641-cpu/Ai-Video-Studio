@@ -91,7 +91,7 @@ def test_frame_preview_args_use_the_crop_at_that_time():
 # -- settings and persistence ---------------------------------------------------------------------
 def test_settings_validation():
     ReframeSettings().validate()
-    for bad in (dict(mode="zoom"), dict(preset="21:9"), dict(zoom=0.5), dict(caption_safe="left"),
+    for bad in (dict(tracking_mode="zoom"), dict(preset="21:9"), dict(zoom=0.5), dict(caption_safe="left"),
                 dict(output_width=1080, output_height=0), dict(output_width=10, output_height=10),
                 dict(dead_zone=0.9), dict(switches=[[-1, 2]]), dict(analysis_fps=0)):
         with pytest.raises(ReframeError):
@@ -126,7 +126,7 @@ def test_project_saves_and_reopens_reframe_data(tmp_path):
     item.reframe = ReframeState(ReframeSettings(preset="1:1", target=1, switches=[[1.0, None]], zoom=1.3), analysis)
     path = project.save(tmp_path / "p.avsproj")
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["version"] == 3 and data["media"][0]["reframe"]["settings"]["preset"] == "1:1"
+    assert data["version"] == 4 and data["media"][0]["reframe"]["settings"]["preset"] == "1:1"
     loaded = Project.load(path).media[0]
     assert loaded.reframe.settings.target == 1 and loaded.reframe.settings.zoom == 1.3
     assert loaded.reframe.analysis.tracks[0].id == 1

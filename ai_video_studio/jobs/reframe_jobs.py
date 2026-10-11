@@ -28,6 +28,8 @@ from ai_video_studio.reframe.export import (
     sendcmd_script,
 )
 from ai_video_studio.reframe.framing import CropPath
+from ai_video_studio.reframe.model import TrackingAnalysis
+from ai_video_studio.reframe.speech import analyse_speech, extract_speech_audio
 
 REFRAME_ANALYZE_JOB = "reframe_analyze"
 REFRAME_EXPORT_JOB = "reframe_export"
@@ -38,10 +40,20 @@ DetectorFactory = Callable[[dict], DetectorSet]
 
 def default_detector_factory(payload: dict) -> DetectorSet:
     models_dir = Path(payload.get("models_dir") or paths.data_dir() / "models")
-    return build_detectors(models_dir, bool(payload.get("detect_persons", True)))
+    return build_detectors(models_dir, bool(payload.get("detect_persons", True)),
+                           min_confidence=float(payload.get("face_threshold", 0.6)))
 
 
-def make_reframe_analyze_handler(get_ffmpeg: Callable[[], Path], detector_factory: DetectorFactory | None = None):
+def payload_features(p: dict) -> set[str]:
+    features = set(p.get("features") or ["faces"])
+    if p.get("detect_persons") and "faces" in features and "features" not in p:
+        features.add("persons")
+    return features
+
+
+def make_reframe_analyze_handler(get_ffmpeg: Callable[[], Path], detector_factory: DetectorFactory | None = None,
+                                 vad=None):
+    """``vad`` replaces the Silero voice-activity model (tests)."""
     factory = detector_factory or default_detector_factory
 
     def handle(job: Job, ctx: JobContext) -> dict:
@@ -50,18 +62,46 @@ def make_reframe_analyze_handler(get_ffmpeg: Callable[[], Path], detector_factor
         if not source.is_file():
             raise MediaError(f"Source video not found: {source}")
         ffmpeg = get_ffmpeg()
-        detectors = factory(p)
-        ctx.check_cancelled()
+        features = payload_features(p)
+        want_speech = "speech" in features
+        video_share = 0.8 if want_speech else 1.0
         stat = source.stat()
-        analysis = analyze_video(
-            ffmpeg, str(source), int(p["width"]), int(p["height"]), float(p.get("duration") or 0),
-            float(p.get("sample_fps", 5)), detectors, detectors.description,
-            progress=ctx.report_progress, cancel_event=ctx.cancel_event,
-        )
-        analysis.warnings = detectors.warnings + analysis.warnings
+        width, height = int(p["width"]), int(p["height"])
+        duration = float(p.get("duration") or 0)
+        sample_fps = float(p.get("sample_fps", 5))
+        face_threshold = float(p.get("face_threshold", 0.6))
+        detector_warnings: list[str] = []
+        if features & {"faces", "persons", "mouth"}:
+            detectors = factory(p)
+            detector_warnings = list(detectors.warnings)
+            ctx.check_cancelled()
+            analysis = analyze_video(
+                ffmpeg, str(source), width, height, duration, sample_fps, detectors, detectors.description,
+                progress=lambda f: ctx.report_progress(f * video_share), cancel_event=ctx.cancel_event,
+                features=features, face_threshold=face_threshold,
+            )
+        else:
+            analysis = TrackingAnalysis(width=width, height=height, duration=duration, sample_fps=sample_fps,
+                                        frames_analyzed=0, detector="", features=[], face_threshold=face_threshold)
+        if want_speech:
+            folder = job_temp_dir(job)
+            try:
+                wav = folder / "speech.wav"
+                extract_speech_audio(ffmpeg, str(source), str(wav), cancel_event=ctx.cancel_event)
+                ctx.report_progress(video_share + 0.05)
+                kwargs = {"vad": vad, "detector": "test VAD"} if vad is not None else {}
+                analysis.speech = analyse_speech(
+                    str(wav), progress=lambda f: ctx.report_progress(video_share + 0.05 + 0.15 * f * 0.999),
+                    check_cancelled=ctx.check_cancelled, **kwargs)
+            finally:
+                remove_tree(folder)
+            analysis.features = sorted(set(analysis.features) | {"speech"})
+            if not any(v >= 0.5 for v in analysis.speech.prob):
+                analysis.notes.append("No speech was detected in the audio.")
+        analysis.warnings = detector_warnings + analysis.warnings
         analysis.source_size, analysis.source_mtime = stat.st_size, round(stat.st_mtime, 3)
         return {"media_id": p.get("media_id"), "analysis": analysis.to_dict(),
-                "tracks": len(analysis.tracks), "warnings": analysis.warnings}
+                "tracks": len(analysis.tracks), "features": analysis.features, "warnings": analysis.warnings}
 
     return handle
 
