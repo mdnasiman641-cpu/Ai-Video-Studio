@@ -22,6 +22,10 @@ from ai_video_studio.jobs.caption_jobs import (
     make_model_download_handler,
     make_transcribe_handler,
 )
+from ai_video_studio.ai.profiles import ProviderProfile, ProviderStore
+from ai_video_studio.ai.router import AIRouter
+from ai_video_studio.ai.usage import UsageLog
+from ai_video_studio.jobs.ai_jobs import AI_TEST_JOB, AI_TITLES_JOB, make_ai_test_handler, make_ai_titles_handler
 from ai_video_studio.jobs.handlers import PROBE_JOB, make_probe_handler
 from ai_video_studio.jobs.manager import JobManager
 from ai_video_studio.jobs.reframe_jobs import (
@@ -72,13 +76,18 @@ class Services:
         self.presets = PresetStore(self.db)
         self.render_presets = RenderPresetStore(self.db)
         self.batches = BatchStore(self.db)
+        self.ai_providers = ProviderStore(self.db)
+        self.ai_providers.ensure_defaults()
+        self.ai_usage = UsageLog(self.db)
         self.jobs = JobManager(JobStore(self.db), self.settings.get("max_concurrent_jobs"),
                                self.settings.get("max_concurrent_renders"))
         self.jobs.register(PROBE_JOB, make_probe_handler(self.ffprobe_path))
         self.jobs.register(TRANSCRIBE_JOB, make_transcribe_handler(self.ffmpeg_path))
         self.jobs.register(BURN_IN_JOB, make_burn_in_handler(self.ffmpeg_path), heavy=True)
         self.jobs.register(FRAME_PREVIEW_JOB, make_frame_preview_handler(self.ffmpeg_path))
-        self.jobs.register(CORRECTION_JOB, make_correction_handler(secrets.get_api_key))
+        self.jobs.register(CORRECTION_JOB, make_correction_handler(secrets.get_api_key, usage_log=self.ai_usage))
+        self.jobs.register(AI_TEST_JOB, make_ai_test_handler(secrets.get_api_key, usage_log=self.ai_usage))
+        self.jobs.register(AI_TITLES_JOB, make_ai_titles_handler(secrets.get_api_key, usage_log=self.ai_usage))
         self.jobs.register(MODEL_DOWNLOAD_JOB, make_model_download_handler())
         self.jobs.register(REFRAME_ANALYZE_JOB, make_reframe_analyze_handler(self.ffmpeg_path))
         self.jobs.register(REFRAME_EXPORT_JOB, make_reframe_export_handler(self.ffmpeg_path), heavy=True)
@@ -111,12 +120,14 @@ class Services:
         settings.validate()
         self.settings.set("export_output_settings", json.dumps(settings.to_dict()))
 
-    def ai_correction_config(self) -> tuple[str, str] | None:
-        """``(provider, model)`` when AI correction is enabled and has a key, else ``None``."""
-        provider = self.settings.get("ai_correction_provider")
-        if provider == "none" or not secrets.get_api_key(provider):
-            return None
-        return provider, self.settings.get(f"{provider}_model")
+    def ai_profile_key(self, profile: ProviderProfile) -> str | None:
+        return secrets.profile_key(profile.id, profile.key_env)
+
+    def ai_plan(self, capability: str) -> tuple[list[ProviderProfile], list[str]]:
+        """Profiles that would be tried for ``capability`` (in order) and why others are not used."""
+        router = AIRouter(self.ai_providers.list(), self.ai_profile_key)
+        usable, skipped = router.plan(capability)
+        return [p for p, _key in usable], skipped
 
     def tool_status(self) -> ToolStatus:
         configured = self.settings.get("ffmpeg_dir")

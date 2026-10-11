@@ -69,6 +69,34 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # 4: AI provider profiles (no secrets: keys stay in the credential store) and a request log
+    #    without prompt or response content
+    """
+    CREATE TABLE ai_providers (
+        id TEXT PRIMARY KEY,
+        position INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE ai_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        provider_name TEXT NOT NULL,
+        model TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        error_kind TEXT,
+        status_code INTEGER,
+        duration_ms INTEGER NOT NULL,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        usage_source TEXT NOT NULL,
+        cost REAL,
+        cost_source TEXT NOT NULL
+    );
+    CREATE INDEX idx_ai_requests_created ON ai_requests(created_at);
+    """,
 ]
 
 

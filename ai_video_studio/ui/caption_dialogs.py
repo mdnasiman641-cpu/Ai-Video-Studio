@@ -301,3 +301,39 @@ class FramePreviewDialog(QDialog):
         layout.addWidget(scroll, 1)
         layout.addWidget(close)
         self.resize(min(1320, pixmap.width() + 40), min(820, pixmap.height() + 100))
+
+
+class TitleSuggestionsDialog(QDialog):
+    """Shows an AI title/description suggestion for the user to copy. Nothing is applied anywhere."""
+
+    def __init__(self, result: dict, parent: QWidget | None = None):
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QLineEdit, QPlainTextEdit
+
+        super().__init__(parent)
+        self.setWindowTitle("Title and Description Suggestion")
+        self.title = QLineEdit(result.get("title", ""))
+        self.description = QPlainTextEdit(result.get("description", ""))
+        self.hashtags = QLineEdit(" ".join(result.get("hashtags", [])))
+        layout = QVBoxLayout(self)
+        for label, widget in (("Title", self.title), ("Description", self.description), ("Hashtags", self.hashtags)):
+            layout.addWidget(QLabel(label))
+            layout.addWidget(widget)
+        note = QLabel(f"Suggested by {result.get('provider', '?')} ({result.get('model', '?')}). Check it before "
+                      "you use it; AI text can be wrong.")
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        layout.addWidget(note)
+        copy = QPushButton("Copy All")
+        copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.text()))
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(copy)
+        row.addWidget(close)
+        layout.addLayout(row)
+        self.resize(560, 420)
+
+    def text(self) -> str:
+        return f"{self.title.text()}\n\n{self.description.toPlainText()}\n\n{self.hashtags.text()}".strip()

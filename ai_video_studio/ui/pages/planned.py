@@ -10,12 +10,8 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from ai_video_studio.ui.widgets.common import Card, muted, page_title, section_title
 
-PLANNED_PAGES: dict[str, tuple[int, list[str]]] = {
-    "AI Models": (7, [
-        "Gemini and OpenAI provider configuration (keys stored outside the repo)",
-        "Primary/fallback providers, retries, rate-limit handling, usage display",
-    ]),
-}
+# Phases 4-7 are implemented; later phases (8 and 9) have no navigation page yet.
+PLANNED_PAGES: dict[str, tuple[int, list[str]]] = {}
 
 
 class PlannedPage(QWidget):

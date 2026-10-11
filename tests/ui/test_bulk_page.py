@@ -4,7 +4,6 @@ import pytest
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from ai_video_studio.core.ffmpeg_tools import find_tool, probe_video
-from ai_video_studio.jobs.models import JobState
 from ai_video_studio.render.batch import RenderPreset
 from ai_video_studio.render.layout import ResizeSettings
 from ai_video_studio.render.output import OutputSettings

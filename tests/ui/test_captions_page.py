@@ -221,7 +221,10 @@ def test_ai_correction_review_flow(qtbot, window, monkeypatch):
         return 200, {"candidates": [{"content": {"parts": [{"text": json.dumps(answer)}]}}]}
 
     window.services.jobs.register(CORRECTION_JOB, make_correction_handler(lambda p: "test-key", transport=transport))
-    monkeypatch.setattr(window.services, "ai_correction_config", lambda: ("gemini", "gemini-test"))
+    profile = window.services.ai_providers.get("gemini")  # standard profile, enabled with a test model
+    profile.enabled, profile.model = True, "gemini-test"
+    window.services.ai_providers.save(profile)
+    monkeypatch.setattr(window.services, "ai_profile_key", lambda p: "test-key")
     page._update_buttons()
     assert page.ai_button.isEnabled()
     window.controller.submit_correction(media_id)
@@ -243,7 +246,8 @@ def test_ai_correction_review_flow(qtbot, window, monkeypatch):
 
 def test_ai_button_disabled_without_configuration(qtbot, window):
     page, _ = _generate(qtbot, window)
-    assert not page.ai_button.isEnabled() and "Settings" in page.ai_button.toolTip()
+    assert not page.ai_button.isEnabled() and "AI Models page" in page.ai_button.toolTip()
+    assert not page.titles_button.isEnabled() and "AI Models page" in page.titles_button.toolTip()
 
 
 def test_diff_html_marks_changes():

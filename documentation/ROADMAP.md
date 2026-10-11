@@ -40,7 +40,8 @@ Phase 1 adds no other dependencies. Planned additions, each checked for compatib
 4. **Smart Cut**: done (v0.7.0). See "Phase 4" below.
 5. **Resize & Crop**: done (v0.7.0). See "Phase 5" below.
 6. **Bulk Processing**: done (v0.7.0). See "Phase 6" below.
-7. to 9.: see the sections below and "Remaining phases".
+7. **AI provider manager**: done (v0.7.0). See "Phase 7" below.
+8. and 9.: not started (see "Remaining phases").
 
 ## Phase 2 verification (v0.2.1, GitHub Actions `windows-latest` + `ubuntu-latest`)
 
@@ -353,6 +354,61 @@ NVENC on the RTX 4070.
   file, and restoring the batch in a new page.
 
 **Not verified:** long batches on the user's PC, and NVENC concurrency limits on GeForce cards.
+
+## Phase 7: AI provider manager (v0.7.0)
+
+**Design**
+- **Profiles** (`ai/profiles.py`) are stored in the user database (`ai_providers`) in priority
+  order. Each has: display name, type (Google Gemini, OpenAI, or an OpenAI-compatible custom
+  API), base URL, model, enabled, capabilities, timeout, retries, an optional local rate limit,
+  optional prices, an optional key environment variable, and whether a key is needed.
+- **Keys** are never in profiles: they live in the Windows Credential Manager (account = profile
+  id) or in an environment variable. The standard profiles keep the ids `gemini`/`openai`, so
+  keys stored by v0.2–v0.6 still work. Keys are sent only in headers and scrubbed from provider
+  error text; the log formatter masks them too.
+- **First start** imports the previous settings (`ai_correction_provider`, model names, timeout)
+  into the standard profiles. Those settings are no longer edited in Settings.
+- **Capabilities:**
+  - text, structured JSON, caption correction, and title/description generation;
+  - audio and video understanding are listed but cannot be enabled: the app never uploads
+    media to cloud providers;
+  - unsupported requests raise a clear error instead of being sent.
+- **Routing** (`ai/router.py`):
+  - enabled profiles that offer the capability and have a key are tried in order;
+  - temporary errors (429, 5xx, network, timeout) are retried with exponential backoff up to
+    the profile's limit, then the next provider is tried;
+  - authentication, missing configuration, HTTP 404 and invalid answers (one retry) fall back;
+  - 400/422 rejections are not sent to other providers;
+  - each provider is tried at most once per request (no loops);
+  - cancellation is checked before each attempt and during backoff;
+  - a local rate limit waits up to 30 s, otherwise moves on.
+- **Usage log** (`ai_requests`): provider, model, task, result, duration and tokens, marked
+  as reported by the provider or estimated locally. Costs appear only when the user entered
+  prices, are labelled as estimates, and are "unknown" otherwise. Prompts and answers are never
+  stored.
+- **AI Models page:**
+  - add, edit, delete, enable/disable, move up/down and set primary;
+  - Test Connection (lists models, sends no prompt) and Test Model (a tiny JSON prompt, after
+    confirmation);
+  - restore defaults; key status without showing the key;
+  - routing summary per feature; usage totals and history.
+- **Integration:**
+  - Captions → AI Check (correction) and Suggest Title (title, description and hashtags shown
+    for copying; nothing is applied);
+  - the user confirms first, with the list of providers that may receive the caption text;
+  - job payloads snapshot profiles without keys;
+  - correction jobs queued by older versions still run.
+- Database migration 4 adds `ai_providers` and `ai_requests`.
+
+**Verified (mocked providers, CI):** request shapes for Gemini, OpenAI and custom APIs; JSON mode;
+usage parsing and estimates; validation; persistence and ordering; legacy import; key lookup and
+redaction; timeouts, retries, rate limits, fallback, bad requests, 404, invalid JSON, cancellation,
+unsupported capabilities and missing keys; the usage log keeps no content; the correction, test
+and title jobs; the GUI add/enable/reorder/test/delete flow; and the title suggestion flow.
+
+**Not verified:** calls to the real Gemini/OpenAI APIs (no keys in CI, no paid calls), and
+Credential Manager behaviour on the user's PC (the Windows CI runner's credential store is used
+by an existing test).
 
 ## Remaining phases
 

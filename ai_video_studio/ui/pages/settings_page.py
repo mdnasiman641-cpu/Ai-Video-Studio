@@ -25,14 +25,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ai_video_studio.ai.providers import PROVIDERS
 from ai_video_studio.captions.models import WHISPER_MODELS, model_status, remove_model
 from ai_video_studio.captions.transcriber import LANGUAGES, MODELS
 from ai_video_studio.jobs.caption_jobs import MODEL_DOWNLOAD_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import SettingsError, StudioError
-from ai_video_studio.storage import secrets
 from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
 from ai_video_studio.services import Services
 from ai_video_studio.ui.widgets.output_settings import OutputSettingsForm
@@ -274,48 +272,13 @@ class SettingsPage(QWidget):
             "project, which you can change on the Auto Reframe page at any time."))
         tracking.body.addWidget(self.tracking)
 
-        # AI correction
-        self.ai_provider = QComboBox()
-        self.ai_provider.addItem("Off", "none")
-        for code, name in PROVIDERS.items():
-            self.ai_provider.addItem(name, code)
-        self.gemini_model = QLineEdit()
-        self.openai_model = QLineEdit()
-        self.ai_timeout = QSpinBox()
-        self.ai_timeout.setRange(10, 300)
-        self.ai_timeout.setSuffix(" s")
+        # AI providers live on their own page now
         ai = Card()
-        ai.body.addWidget(section_title("AI caption correction (optional)"))
-        aform = QFormLayout()
-        aform.addRow("Provider:", self.ai_provider)
-        aform.addRow("Gemini model:", self.gemini_model)
-        aform.addRow("OpenAI model:", self.openai_model)
-        aform.addRow("Request timeout:", self.ai_timeout)
-        self.key_inputs: dict[str, QLineEdit] = {}
-        self.key_status: dict[str, QLabel] = {}
-        for code, name in PROVIDERS.items():
-            key_edit = QLineEdit()
-            key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-            key_edit.setPlaceholderText("Paste a new key to store it")
-            save_key = QPushButton("Store Key")
-            remove_key = QPushButton("Remove Key")
-            status = QLabel()
-            status.setObjectName("Muted")
-            row = QHBoxLayout()
-            row.addWidget(key_edit, 1)
-            row.addWidget(save_key)
-            row.addWidget(remove_key)
-            aform.addRow(f"{name} API key:", row)
-            aform.addRow("", status)
-            save_key.clicked.connect(lambda _c=False, p=code: self.store_key(p))
-            remove_key.clicked.connect(lambda _c=False, p=code: self.remove_key(p))
-            self.key_inputs[code] = key_edit
-            self.key_status[code] = status
-        ai.body.addLayout(aform)
+        ai.body.addWidget(section_title("AI providers"))
         ai.body.addWidget(muted(
-            "Only caption text is sent, and only when you click AI Check. Keys are read from the "
-            "GEMINI_API_KEY / OPENAI_API_KEY environment variables or stored in the Windows Credential "
-            "Manager; they are never written to project files, the database or logs."))
+            "Gemini, OpenAI and OpenAI-compatible providers, their models, API keys, priorities and usage are "
+            "configured on the AI Models page. Keys are kept in the Windows Credential Manager (or environment "
+            "variables) and never in project files, the database or logs."))
 
         # Data
         data = Card()
@@ -392,10 +355,6 @@ class SettingsPage(QWidget):
             "video_encoder": self.video_encoder.currentData(),
             "video_quality": self.video_quality.value(),
             "export_output_settings": self._output_json(),
-            "ai_correction_provider": self.ai_provider.currentData(),
-            "gemini_model": self.gemini_model.text(),
-            "openai_model": self.openai_model.text(),
-            "ai_timeout_seconds": self.ai_timeout.value(),
         } | {key: self.tracking.values()[field] for key, field in REFRAME_DEFAULT_KEYS.items()}
 
     def _output_json(self) -> str:
@@ -423,12 +382,7 @@ class SettingsPage(QWidget):
         self.video_encoder.setCurrentIndex(self.video_encoder.findData(s.get("video_encoder")))
         self.video_quality.setValue(s.get("video_quality"))
         self.output_form.set_settings(self.services.output_defaults())
-        self.ai_provider.setCurrentIndex(self.ai_provider.findData(s.get("ai_correction_provider")))
-        self.gemini_model.setText(s.get("gemini_model"))
-        self.openai_model.setText(s.get("openai_model"))
-        self.ai_timeout.setValue(s.get("ai_timeout_seconds"))
         self.tracking.set_values({field: s.get(key) for key, field in REFRAME_DEFAULT_KEYS.items()})
-        self.refresh_key_status()
 
     def save(self) -> bool:
         try:
@@ -465,28 +419,6 @@ class SettingsPage(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Folder containing ffmpeg and ffprobe", self.ffmpeg_dir.text())
         if folder:
             self.ffmpeg_dir.setText(folder)
-
-    def refresh_key_status(self) -> None:
-        for provider, label in self.key_status.items():
-            source = secrets.key_source(provider)
-            label.setText(f"Key found in {source}." if source else "No key configured.")
-
-    def store_key(self, provider: str) -> None:
-        edit = self.key_inputs[provider]
-        try:
-            secrets.set_api_key(provider, edit.text())
-        except StudioError as exc:
-            QMessageBox.warning(self, "API Key", str(exc))
-            return
-        edit.clear()
-        self.refresh_key_status()
-
-    def remove_key(self, provider: str) -> None:
-        secrets.delete_api_key(provider)
-        self.refresh_key_status()
-        if secrets.key_source(provider):
-            QMessageBox.information(self, "API Key", "The stored key was removed, but a key is still provided "
-                                                     "by an environment variable.")
 
     def _browse_model(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "faster-whisper (CTranslate2) model folder",

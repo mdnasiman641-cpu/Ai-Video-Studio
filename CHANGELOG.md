@@ -79,6 +79,34 @@ Phases 4 to 7: Smart Cut, Resize & Crop, Bulk Processing and the AI provider man
     jobs keep running.
 - Database migration 3 (`jobs.stage`, `render_presets`, `batches`).
 
+### Added — Phase 7: AI provider manager
+- **AI Models page**, replacing the placeholder:
+  - provider profiles (Gemini, OpenAI, OpenAI-compatible custom APIs) with name, base URL,
+    model, enabled, capabilities, timeout, retries, local rate limit, optional prices and key
+    environment variable;
+  - add, edit, delete, enable/disable, reorder and set primary; restore defaults;
+  - Test Connection and Test Model; key status without showing the key;
+  - a routing summary, plus usage totals and history.
+- **Secure keys:** stored in the Windows Credential Manager per profile, or read from an
+  environment variable. Never saved in the database, projects or logs; scrubbed from provider
+  error messages.
+- **Capability-aware routing:**
+  - primary/fallback order and bounded retries with backoff for temporary errors;
+  - no retry on authentication errors; invalid requests are not sent to other providers;
+  - each provider is tried at most once per request; cancellation is supported.
+  - Audio/video capabilities are shown but not available (media is never uploaded).
+- **Usage history:** tokens marked as reported or estimated; costs only from your own prices
+  and labelled as estimates; no prompt or answer content stored.
+- **Captions → Suggest Title**: AI title, description and hashtags from the caption text,
+  shown for copying.
+- AI Check confirms first, naming every provider that may receive the caption text.
+- Database migration 4 (`ai_providers`, `ai_requests`).
+
+### Removed
+- The single-provider "AI caption correction" card in Settings. Its values are imported once
+  into the new profiles, and stored keys keep working.
+- The Phase 4–7 placeholder pages: every navigation entry is now a working page.
+
 ### Changed
 - Project format version 5 (adds the optional `smart_cut` and `resize` entries per video).
   Older projects open unchanged.

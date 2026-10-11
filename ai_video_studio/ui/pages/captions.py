@@ -42,9 +42,11 @@ from ai_video_studio.captions.srt import read_srt_file, write_srt_file
 from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.core.errors import StudioError
 from ai_video_studio.core.media import MediaItem, MediaStatus
+from ai_video_studio.jobs.ai_jobs import AI_TITLES_JOB
 from ai_video_studio.jobs.caption_jobs import BURN_IN_JOB, CORRECTION_JOB, FRAME_PREVIEW_JOB, TRANSCRIBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.ui.caption_dialogs import (
+    TitleSuggestionsDialog,
     ChooseVideosDialog,
     CorrectionReviewDialog,
     FramePreviewDialog,
@@ -109,6 +111,9 @@ class CaptionsPage(QWidget):
         self.exact_button.setToolTip("Render the current frame with FFmpeg exactly as it will be exported")
         self.ai_button = QPushButton("AI Check…")
         self.review_button = QPushButton("Review Suggestions")
+        self.titles_button = QPushButton("Suggest Title…")
+        self.titles_button.setToolTip("Ask an AI provider for a title, description and hashtags based on the "
+                                      "caption text (shown for you to copy; nothing is changed)")
         top = QVBoxLayout()
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Video:"))
@@ -117,7 +122,7 @@ class CaptionsPage(QWidget):
         row1.addStretch(1)
         row2 = QHBoxLayout()
         for b in (self.import_button, self.export_srt_button, self.export_video_button,
-                  self.exact_button, self.ai_button, self.review_button):
+                  self.exact_button, self.ai_button, self.review_button, self.titles_button):
             row2.addWidget(b)
         row2.addStretch(1)
         top.addLayout(row1)
@@ -213,6 +218,7 @@ class CaptionsPage(QWidget):
         self.export_video_button.clicked.connect(self.export_video)
         self.exact_button.clicked.connect(self.exact_preview)
         self.ai_button.clicked.connect(self.ai_check)
+        self.titles_button.clicked.connect(self.suggest_titles)
         self.review_button.clicked.connect(self.review_suggestions)
         self.add_button.clicked.connect(self.add_at_playhead)
         self.split_button.clicked.connect(self.split_at_playhead)
@@ -328,8 +334,6 @@ class CaptionsPage(QWidget):
     def _on_setting(self, key: str, value) -> None:
         if key == "preview_volume":
             self.preview.set_volume(value)
-        elif key in ("ai_correction_provider",):
-            self._update_buttons()
 
     # ------------------------------------------------------------------ table
     def refresh_table(self) -> None:
@@ -725,20 +729,24 @@ class CaptionsPage(QWidget):
         self.status.setText("Rendering exact preview with FFmpeg…")
         return job
 
+    def _ai_disclosure(self, capability: str, what: str) -> bool:
+        profiles, skipped = self.services.ai_plan(capability)
+        if not profiles:
+            QMessageBox.information(self, "AI", "No AI provider is ready for this. Set one up on the AI Models "
+                                    "page (provider, model and API key).\n\n" + "\n".join(skipped))
+            return False
+        primary = f"{profiles[0].display_name} ({profiles[0].model})"
+        fallbacks = ", ".join(f"{p.display_name} ({p.model})" for p in profiles[1:])
+        text = (f"Send {what} to {primary}?" + (f"\n\nIf it fails, the same text may be sent to: {fallbacks}."
+                                                 if fallbacks else "")
+                + "\n\nOnly caption text is sent (no audio or video). This may cost API credits. "
+                  "Nothing changes until you review the result.")
+        return QMessageBox.question(self, "AI", text) == QMessageBox.StandardButton.Yes
+
     def ai_check(self) -> None:
-        config = self.services.ai_correction_config()
-        if config is None:
-            QMessageBox.information(self, "AI Check", "AI correction is off. Choose a provider and add its API "
-                                                      "key in Settings → AI caption correction.")
-            return
-        provider, model = config
         count = len(self.track().segments) if self.track() else 0
-        answer = QMessageBox.question(
-            self, "AI Check",
-            f"Send the text of {count} caption(s) to {provider} ({model}) for spelling and recognition fixes?\n\n"
-            "Only caption text is sent (no audio or video). This may cost API credits. "
-            "You review every suggestion before anything changes.")
-        if answer != QMessageBox.StandardButton.Yes:
+        if not self._ai_disclosure("caption_correction", f"the text of {count} caption(s) for spelling and "
+                                                        "recognition fixes"):
             return
         try:
             self.controller.submit_correction(self._media_id)
@@ -813,6 +821,23 @@ class CaptionsPage(QWidget):
         if job.kind in (TRANSCRIBE_JOB, BURN_IN_JOB, CORRECTION_JOB):
             self._update_status(job)
             self._update_buttons()
+        elif job.kind == AI_TITLES_JOB and job.state.is_finished:
+            if job.state is JobState.COMPLETED and job.result:
+                self.status.setText(f"Suggestions from {job.result['provider']} ({job.result['model']}).")
+                TitleSuggestionsDialog(job.result, self).exec()
+            elif job.state is JobState.FAILED:
+                self.status.setText(f"⚠ Title suggestion failed: {job.error}")
+
+    def suggest_titles(self) -> Job | None:
+        if not self._ai_disclosure("titles", "the caption text of this video for a title and description"):
+            return None
+        try:
+            job = self.controller.submit_titles(self._media_id)
+        except StudioError as exc:
+            QMessageBox.warning(self, "Suggest Title", str(exc))
+            return None
+        self.status.setText("Asking for a title and description…")
+        return job
 
     def _update_status(self, job: Job | None = None) -> None:
         labels = {TRANSCRIBE_JOB: "Generating captions", BURN_IN_JOB: "Exporting video",
@@ -849,10 +874,14 @@ class CaptionsPage(QWidget):
         self.export_srt_button.setEnabled(has_caps)
         self.export_video_button.setEnabled(has_caps and ready)
         self.exact_button.setEnabled(has_caps and ready)
-        ai_ready = self.services.ai_correction_config() is not None
+        ai_ready = bool(self.services.ai_plan("caption_correction")[0])
         self.ai_button.setEnabled(has_caps and ai_ready and not checking)
         self.ai_button.setToolTip("" if ai_ready else
-                                  "Optional. Choose a provider and add an API key in Settings to enable.")
+                                  "Optional. Set up an AI provider with caption correction on the AI Models page.")
+        titles_ready = bool(self.services.ai_plan("titles")[0])
+        self.titles_button.setEnabled(has_caps and titles_ready)
+        self.titles_button.setToolTip(self.titles_button.toolTip() if titles_ready else
+                                      "Optional. Set up an AI provider with title generation on the AI Models page.")
         pending = len(track.pending_corrections) if track else 0
         self.review_button.setEnabled(pending > 0)
         self.review_button.setText(f"Review Suggestions ({pending})" if pending else "Review Suggestions")

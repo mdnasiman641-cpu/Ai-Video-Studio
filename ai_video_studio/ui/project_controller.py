@@ -26,6 +26,7 @@ from ai_video_studio.jobs.caption_jobs import (
     MODEL_DOWNLOAD_JOB,
     TRANSCRIBE_JOB,
 )
+from ai_video_studio.jobs.ai_jobs import AI_TITLES_JOB
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, REFRAME_EXPORT_JOB, REFRAME_PREVIEW_JOB
@@ -308,21 +309,37 @@ class ProjectController(QObject):
         return self.services.jobs.submit(FRAME_PREVIEW_JOB, f"Caption frame preview: {item.name}", payload,
                                          project_id=self.project.id)
 
+    def ai_providers_for(self, capability: str) -> list:
+        """Profiles that would be tried (primary first); raises with the reasons when there are none."""
+        profiles, skipped = self.services.ai_plan(capability)
+        if not profiles:
+            reasons = "; ".join(skipped) or "no providers are configured"
+            raise StudioError(f"No AI provider is ready for this ({reasons}). Set one up on the AI Models page.")
+        return profiles
+
     def submit_correction(self, media_id: str) -> Job:
-        config = self.services.ai_correction_config()
-        if config is None:
-            raise StudioError("AI correction is off. Choose a provider and add its API key in Settings.")
         item = self.media(media_id)
         if not item.captions or not item.captions.segments:
             raise StudioError("This video has no captions to check.")
-        provider, model = config
+        profiles = self.ai_providers_for("caption_correction")
         payload = {
-            "media_id": media_id, "provider": provider, "model": model,
+            "media_id": media_id, "capability": "caption_correction",
+            "profiles": [p.to_dict() for p in profiles],  # snapshot without keys; keys are read when it runs
             "language": item.captions.language,
-            "timeout": self.services.settings.get("ai_timeout_seconds"),
             "segments": [{"id": s.id, "text": s.text} for s in item.captions.segments],
         }
         return self.services.jobs.submit(CORRECTION_JOB, f"AI caption check: {item.name}", payload,
+                                         project_id=self.project.id)
+
+    def submit_titles(self, media_id: str) -> Job:
+        item = self.media(media_id)
+        if not item.captions or not item.captions.segments:
+            raise StudioError("This video has no captions to base a title on.")
+        profiles = self.ai_providers_for("titles")
+        payload = {"media_id": media_id, "profiles": [p.to_dict() for p in profiles],
+                   "language": item.captions.language,
+                   "text": " ".join(s.text for s in item.captions.segments)}
+        return self.services.jobs.submit(AI_TITLES_JOB, f"AI title and description: {item.name}", payload,
                                          project_id=self.project.id)
 
     def _recover_transcriptions(self) -> None:

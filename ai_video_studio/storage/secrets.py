@@ -77,3 +77,19 @@ def delete_api_key(provider: str) -> None:
         kr.delete_password(APP_ID, provider)
     except Exception:  # noqa: BLE001 - nothing stored
         pass
+
+
+# -- provider profiles (Phase 7) -------------------------------------------------------------
+# The credential-store account of a profile is its id. The standard profiles keep the ids
+# "gemini" and "openai", so keys stored by earlier versions keep working.
+
+def profile_key(profile_id: str, key_env: str = "") -> str | None:
+    if key_env and os.environ.get(key_env, "").strip():
+        return os.environ[key_env].strip()
+    return get_api_key(profile_id)
+
+
+def profile_key_source(profile_id: str, key_env: str = "") -> str | None:
+    if key_env and os.environ.get(key_env, "").strip():
+        return f"environment variable {key_env}"
+    return key_source(profile_id)

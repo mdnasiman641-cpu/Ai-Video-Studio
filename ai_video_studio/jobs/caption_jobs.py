@@ -191,9 +191,27 @@ def make_frame_preview_handler(get_ffmpeg: Callable[[], Path]):
     return handle
 
 
-def make_correction_handler(get_api_key: Callable[[str], str | None], transport=None, sleep=None):
+def make_correction_handler(get_api_key: Callable[[str], str | None], transport=None, sleep=None, usage_log=None):
+    """Caption correction. Current payloads carry the provider profiles to try (in priority order);
+    payloads queued by older versions name a single provider and model."""
+
     def handle(job: Job, ctx: JobContext) -> dict:
         p = job.payload
+        if "profiles" in p:
+            from ai_video_studio.ai.profiles import ProviderProfile
+            from ai_video_studio.ai.router import AIRouter, RouterProvider
+
+            profiles = [ProviderProfile.from_dict(d) for d in p["profiles"]]
+            router = AIRouter(profiles, lambda prof: profile_key_for(prof, get_api_key), transport=transport,
+                              sleep=sleep, usage_log=usage_log, cancel_event=ctx.cancel_event)
+            client = RouterProvider(router, "caption_correction")
+            suggestions = request_corrections(client, p["segments"], p.get("language"),
+                                              progress=ctx.report_progress, check_cancelled=ctx.check_cancelled)
+            last = client.results[-1] if client.results else None
+            notes = [n for r in client.results for n in r.notes]
+            return {"media_id": p.get("media_id"), "provider": last.profile_name if last else "",
+                    "model": last.model if last else "", "suggestions": suggestions, "checked": len(p["segments"]),
+                    "notes": notes}
         provider = p["provider"]
         config = ProviderConfig(provider=provider, model=p["model"], api_key=get_api_key(provider) or "",
                                 timeout=float(p.get("timeout", 60)))
@@ -207,3 +225,12 @@ def make_correction_handler(get_api_key: Callable[[str], str | None], transport=
                 "suggestions": suggestions, "checked": len(p["segments"])}
 
     return handle
+
+
+def profile_key_for(profile, get_api_key: Callable[[str], str | None]) -> str | None:
+    """A profile's key: its environment variable first, then the credential store (account = id)."""
+    import os
+
+    if profile.key_env and os.environ.get(profile.key_env, "").strip():
+        return os.environ[profile.key_env].strip()
+    return get_api_key(profile.id)

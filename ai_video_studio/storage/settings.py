@@ -30,10 +30,6 @@ def _optional_dir(value: str) -> str | None:
     return None
 
 
-def _non_empty(value: str) -> str | None:
-    return None if value.strip() else "must not be empty"
-
-
 def _choice(*options: str) -> Callable[[Any], str | None]:
     return lambda v: None if v in options else f"must be one of {', '.join(options)}"
 
@@ -84,11 +80,9 @@ SETTINGS: dict[str, SettingSpec] = {
     "video_quality": SettingSpec(int, 20, "Video quality (CRF/CQ)", _int_range(10, 40)),
     # Last export settings used for edited exports (Smart Cut, Resize & Crop), as JSON
     "export_output_settings": SettingSpec(str, "", "Export settings", _output_settings_json),
-    # Optional AI caption correction (off unless a provider is chosen)
-    "ai_correction_provider": SettingSpec(str, "none", "AI correction provider", _choice("none", "gemini", "openai")),
-    "gemini_model": SettingSpec(str, "gemini-2.5-flash", "Gemini model", _non_empty),
-    "openai_model": SettingSpec(str, "gpt-4.1-mini", "OpenAI model", _non_empty),
-    "ai_timeout_seconds": SettingSpec(int, 60, "AI request timeout (s)", _int_range(10, 300)),
+    # AI providers (Phase 7) are stored as profiles (ai/profiles.py). The earlier settings
+    # ai_correction_provider, gemini_model, openai_model and ai_timeout_seconds are read once,
+    # directly from the database, to create the first profiles.
     # Auto reframe / tracking defaults
     "reframe_tracking_mode": SettingSpec(str, "auto_face", "Tracking mode", _choice(*_TRACKING_MODES)),
     "reframe_confidence_threshold": SettingSpec(float, 0.6, "Tracking confidence threshold", _float_range(0.3, 0.99)),

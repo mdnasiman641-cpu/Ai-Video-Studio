@@ -44,10 +44,11 @@ class AIError(StudioError):
 Transport = Callable[[str, dict, dict, float], tuple[int, dict]]
 
 
-def urllib_transport(url: str, headers: dict, body: dict, timeout: float) -> tuple[int, dict]:
-    data = json.dumps(body).encode("utf-8")
+def urllib_transport(url: str, headers: dict, body: dict | None, timeout: float) -> tuple[int, dict]:
+    """POST ``body`` as JSON, or GET when ``body`` is None."""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **headers},
-                                     method="POST")
+                                     method="POST" if body is not None else "GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8") or "{}")

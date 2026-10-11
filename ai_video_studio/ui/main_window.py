@@ -25,12 +25,12 @@ from ai_video_studio.core.errors import StudioError
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.services import Services, ToolStatus
 from ai_video_studio.storage.project import PROJECT_EXTENSION
+from ai_video_studio.ui.pages.ai_models import AIModelsPage
 from ai_video_studio.ui.pages.bulk import BulkPage
 from ai_video_studio.ui.pages.captions import CaptionsPage
 from ai_video_studio.ui.pages.edit import EditPage
 from ai_video_studio.ui.pages.home import HomePage
 from ai_video_studio.ui.pages.media import MediaPage, video_file_filter
-from ai_video_studio.ui.pages.planned import PlannedPage
 from ai_video_studio.ui.pages.queue import QueuePage
 from ai_video_studio.ui.pages.reframe import ReframePage
 from ai_video_studio.ui.pages.resize import ResizePage
@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         self.smart_cut_page = SmartCutPage(self.controller, self.bridge)
         self.resize_page = ResizePage(self.controller, self.bridge)
         self.bulk_page = BulkPage(self.controller, self.bridge)
+        self.ai_page = AIModelsPage(services, self.bridge)
         self.queue_page = QueuePage(services, self.bridge)
         self.settings_page = SettingsPage(services, on_tools_changed=self._on_tools_changed)
         built = {
@@ -98,12 +99,13 @@ class MainWindow(QMainWindow):
             "Smart Cut": self.smart_cut_page,
             "Resize & Crop": self.resize_page,
             "Bulk Processing": self.bulk_page,
+            "AI Models": self.ai_page,
             "Export Queue": self.queue_page,
             "Settings": self.settings_page,
         }
         self._page_index: dict[str, int] = {}
         for name, icon in NAVIGATION:
-            page = built.get(name) or PlannedPage(name)
+            page = built[name]
             self._page_index[name] = self.pages.addWidget(page)
             self.sidebar.addItem(QListWidgetItem(glyph_icon(icon), name))
 
