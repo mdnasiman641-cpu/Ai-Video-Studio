@@ -38,9 +38,10 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
 
-      - name: Install FFmpeg (Windows, Gyan build via Chocolatey)
+      - name: Install FFmpeg (Windows, Gyan build via Chocolatey, GitHub fallback)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
+        shell: pwsh
+        run: .github/scripts/install-ffmpeg.ps1
 
       - name: Install FFmpeg and Qt runtime libraries (Linux)
         if: runner.os == 'Linux'
@@ -152,8 +153,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install FFmpeg
-        run: choco install ffmpeg -y --no-progress
+      - name: Install FFmpeg (Chocolatey, GitHub fallback)
+        shell: pwsh
+        run: .github/scripts/install-ffmpeg.ps1
       - name: setup.bat --dev (creates .venv, installs, runs check_env)
         shell: cmd
         run: call scripts\windows\setup.bat --dev

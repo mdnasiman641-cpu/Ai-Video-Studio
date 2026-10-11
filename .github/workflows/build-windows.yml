@@ -33,7 +33,8 @@ jobs:
             packaging/windows/constraints.txt
 
       - name: Install FFmpeg for the test suite (the build bundles its own pinned copy)
-        run: choco install ffmpeg -y --no-progress
+        shell: pwsh
+        run: .github/scripts/install-ffmpeg.ps1
 
       - name: Install Inno Setup if missing
         shell: pwsh
