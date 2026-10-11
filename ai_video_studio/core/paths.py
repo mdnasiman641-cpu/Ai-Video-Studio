@@ -1,8 +1,10 @@
 """Application data locations.
 
-All writable state (database, logs, temp files) lives in a per-user data
-directory, never next to source videos. ``AVS_DATA_DIR`` overrides the location
-(used by tests and portable installs).
+All writable state (database, logs, temp files, downloaded models) lives in a per-user
+data directory (``%LOCALAPPDATA%\\AIVideoStudio`` on Windows), never next to source videos
+and never inside the installation folder, so upgrading or reinstalling keeps it.
+``AVS_DATA_DIR`` overrides the location (tests). A packaged portable copy that has a
+``portable.txt`` file next to its executable keeps its data in ``UserData`` beside it.
 """
 
 from __future__ import annotations
@@ -14,10 +16,32 @@ from pathlib import Path
 from ai_video_studio import APP_ID
 
 
+PORTABLE_MARKER = "portable.txt"
+
+
+def is_frozen() -> bool:
+    """True when running as the packaged executable (PyInstaller)."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def exe_dir() -> Path:
+    """Folder of the packaged executable, or the source checkout when not packaged."""
+    return Path(sys.executable).resolve().parent if is_frozen() else app_root()
+
+
+def portable_data_dir() -> Path | None:
+    if is_frozen() and (exe_dir() / PORTABLE_MARKER).is_file():
+        return exe_dir() / "UserData"
+    return None
+
+
 def data_dir() -> Path:
     override = os.environ.get("AVS_DATA_DIR")
+    portable = portable_data_dir()
     if override:
         base = Path(override)
+    elif portable is not None:
+        base = portable
     elif sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_ID
     elif sys.platform == "darwin":
@@ -48,8 +72,15 @@ def default_projects_dir() -> Path:
     return Path.home() / "Documents" / "AI Video Studio Projects"
 
 
+def models_dir() -> Path:
+    """Downloaded AI models (kept across application upgrades)."""
+    path = data_dir() / "models"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def app_root() -> Path:
-    """Directory containing the application (the PyInstaller bundle dir when frozen)."""
+    """Directory containing the application's bundled resources (``_internal`` when frozen)."""
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
     return Path(__file__).resolve().parents[2]

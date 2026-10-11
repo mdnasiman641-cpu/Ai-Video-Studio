@@ -64,12 +64,75 @@ def _install_exception_hooks(show_dialog: bool = True) -> None:
     threading.excepthook = thread_hook
 
 
+TOOL_HELP = """Command-line options (use AI-Video-Studio-Console.exe to see the output):
+  --check-env              check Python packages, FFmpeg, GPU/CUDA, NVENC and models
+  --self-test [--report FILE] [--assets DIR] [--whisper-model NAME|FOLDER] [--expect-no-ffmpeg]
+                           run the functional self-test of this installation
+  --download-model NAME    download a Whisper model (tiny, base, small, medium, large-v3, large-v3-turbo)
+  --pause                  wait for Enter before closing (diagnostics shortcut)
+  --smoke-test             start the window briefly and exit (used by the build)
+  --help                   show this text"""
+
+
+def _command_line_tool(argv: list[str]) -> int | None:
+    """Handle the non-GUI options; ``None`` means start the application normally."""
+    code: int | None = None
+    if "--help" in argv or "-h" in argv:
+        print(TOOL_HELP)
+        code = 0
+    elif "--check-env" in argv:
+        from ai_video_studio.tools.check_env import main as check_env
+
+        code = check_env()
+    elif "--self-test" in argv:
+        from ai_video_studio.tools.self_test import run_self_test
+
+        code = run_self_test(argv)
+    elif "--download-model" in argv:
+        code = _download_model(argv)
+    if code is not None and "--pause" in argv and sys.stdin is not None:
+        try:
+            input("\nPress Enter to close...")
+        except (EOFError, OSError):
+            pass
+    return code
+
+
+def _download_model(argv: list[str]) -> int:
+    from ai_video_studio.captions.models import WHISPER_MODELS, download_model
+    from ai_video_studio.core.errors import StudioError
+
+    index = argv.index("--download-model")
+    name = argv[index + 1] if index + 1 < len(argv) else ""
+    if name not in WHISPER_MODELS:
+        print(f"Unknown model '{name}'. Choose one of: {', '.join(WHISPER_MODELS)}")
+        return 2
+    last = [-1]
+
+    def progress(fraction: float, text: str) -> None:
+        percent = int(fraction * 100)
+        if percent != last[0]:
+            last[0] = percent
+            print(f"\r{text}", end="", flush=True)
+
+    try:
+        folder = download_model(name, progress=progress)
+    except StudioError as exc:
+        print(f"\nDownload failed: {exc}")
+        return 1
+    print(f"\nModel '{name}' is ready in {folder}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     smoke_test = SMOKE_TEST_FLAG in argv
     argv = [a for a in argv if a != SMOKE_TEST_FLAG]
     ensure_std_streams()
     log_path = configure_logging(paths.logs_dir())
+    tool = _command_line_tool(argv)
+    if tool is not None:
+        return tool
     _install_exception_hooks(show_dialog=not smoke_test)
     log.info("Starting %s %s", APP_NAME, __version__, extra={"python": sys.version.split()[0],
                                                               "platform": sys.platform})

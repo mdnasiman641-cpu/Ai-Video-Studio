@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ai_video_studio.ai.providers import PROVIDERS
+from ai_video_studio.captions.models import WHISPER_MODELS, model_status, remove_model
 from ai_video_studio.captions.transcriber import LANGUAGES, MODELS
+from ai_video_studio.jobs.caption_jobs import MODEL_DOWNLOAD_JOB
+from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import SettingsError, StudioError
 from ai_video_studio.storage import secrets
@@ -27,6 +35,111 @@ from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
 from ai_video_studio.services import Services
 from ai_video_studio.ui.widgets.common import Card, muted, open_folder, page_title, section_title
 from ai_video_studio.ui.widgets.tracking_options import TrackingOptions
+
+
+class ModelsCard(Card):
+    """Downloaded Whisper models: status, size, download (background job) and delete."""
+
+    def __init__(self, services: Services):
+        super().__init__()
+        self.services = services
+        self.body.addWidget(section_title("Speech recognition models"))
+        self.body.addWidget(muted(
+            f"Models are downloaded from Hugging Face only when you ask, checked against their published "
+            f"checksums, and kept in {paths.models_dir() / 'whisper'} (not in the program folder, so updates keep "
+            f"them). Once downloaded they work offline."))
+        self.table = QTableWidget(len(WHISPER_MODELS), 3)
+        self.table.setHorizontalHeaderLabels(["Model", "Size", "Status"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setMinimumHeight(210)
+        self.download_button = QPushButton("Download Selected")
+        self.delete_button = QPushButton("Delete Selected")
+        open_button = QPushButton("Open Models Folder")
+        row = QHBoxLayout()
+        for b in (self.download_button, self.delete_button, open_button):
+            row.addWidget(b)
+        row.addStretch(1)
+        self.body.addWidget(self.table)
+        self.body.addLayout(row)
+        self.download_button.clicked.connect(self.download_selected)
+        self.delete_button.clicked.connect(self.delete_selected)
+        open_button.clicked.connect(lambda: open_folder(paths.models_dir()))
+        self.table.itemSelectionChanged.connect(self._update_buttons)
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self.refresh)
+        self.refresh()
+
+    def _active(self) -> dict[str, Job]:
+        jobs = self.services.jobs.store.list({JobState.QUEUED, JobState.RUNNING})
+        return {j.payload.get("model"): j for j in jobs if j.kind == MODEL_DOWNLOAD_JOB}
+
+    def refresh(self) -> None:
+        active = self._active()
+        for row, name in enumerate(WHISPER_MODELS):
+            status = model_status(name)
+            job = active.get(name)
+            if job is not None:
+                text = f"Downloading… {int(job.progress * 100)}%" if job.state is JobState.RUNNING else "Queued"
+            elif status["downloaded"]:
+                text = f"Downloaded ({status['path']})"
+            else:
+                text = "Not downloaded"
+            size = f"{status['size_mb']} MB" if status["downloaded"] else f"≈ {status['approx_mb']} MB"
+            for col, value in enumerate((name, size, text)):
+                self.table.setItem(row, col, QTableWidgetItem(value))
+        if active and not self._timer.isActive():
+            self._timer.start()
+        elif not active and self._timer.isActive():
+            self._timer.stop()
+        self._update_buttons()
+
+    def selected(self) -> str | None:
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        return list(WHISPER_MODELS)[rows[0].row()] if rows else None
+
+    def _update_buttons(self) -> None:
+        name = self.selected()
+        downloaded = name is not None and model_status(name)["downloaded"]
+        busy = name in self._active() if name else False
+        self.download_button.setEnabled(name is not None and not downloaded and not busy)
+        self.delete_button.setEnabled(downloaded and not busy)
+
+    def download_selected(self) -> Job | None:
+        name = self.selected()
+        if name is None:
+            return None
+        spec = WHISPER_MODELS[name]
+        answer = QMessageBox.question(self, "Download Speech Model",
+                                      f"Download the Whisper model '{name}' (about {spec.approx_mb} MB) from "
+                                      f"Hugging Face now?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return None
+        active = self._active().get(name)
+        job = active or self.services.jobs.submit(MODEL_DOWNLOAD_JOB,
+                                                  f"Download Whisper model: {name} (~{spec.approx_mb} MB)",
+                                                  {"model": name})
+        self.refresh()
+        return job
+
+    def delete_selected(self) -> None:
+        name = self.selected()
+        if name is None:
+            return
+        answer = QMessageBox.question(self, "Delete Speech Model",
+                                      f"Delete the downloaded Whisper model '{name}'? It can be downloaded again later.")
+        if answer == QMessageBox.StandardButton.Yes:
+            if not remove_model(name):
+                QMessageBox.warning(self, "Delete Speech Model", "Some files could not be deleted (in use?).")
+            self.refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.refresh()
 
 
 class SettingsPage(QWidget):
@@ -89,7 +202,7 @@ class SettingsPage(QWidget):
         self.whisper_model = QComboBox()
         self.whisper_model.addItems(MODELS)
         self.whisper_model_dir = QLineEdit()
-        self.whisper_model_dir.setPlaceholderText("Empty = download the selected model automatically")
+        self.whisper_model_dir.setPlaceholderText("Empty = use the models downloaded below")
         browse_model = QPushButton("Browse…")
         model_row = QHBoxLayout()
         model_row.addWidget(self.whisper_model_dir, 1)
@@ -119,6 +232,9 @@ class SettingsPage(QWidget):
         captions.body.addWidget(muted(
             "Models download on first use into the data folder (models\\). GPU transcription needs the CUDA 12 "
             "cuBLAS and cuDNN 9 libraries; without them the CPU is used automatically."))
+
+        # Speech recognition models
+        self.models = ModelsCard(services)
 
         # Export
         self.video_encoder = QComboBox()
@@ -216,6 +332,7 @@ class SettingsPage(QWidget):
         inner.addWidget(tools)
         inner.addWidget(general)
         inner.addWidget(captions)
+        inner.addWidget(self.models)
         inner.addWidget(export)
         inner.addWidget(tracking)
         inner.addWidget(ai)

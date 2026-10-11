@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ai_video_studio.captions.correction import apply_suggestions
+from ai_video_studio.captions.models import WHISPER_MODELS
 from ai_video_studio.captions.model import (
     CaptionError,
     CaptionTrack,
@@ -617,9 +618,20 @@ class CaptionsPage(QWidget):
         if dialog.exec() != GenerateCaptionsDialog.DialogCode.Accepted:
             return
         values = dialog.values()
+        missing = self.controller.model_to_download(values["model"])
+        if missing is not None:
+            spec = WHISPER_MODELS[missing]
+            answer = QMessageBox.question(
+                self, "Download Speech Model",
+                f"The Whisper model '{missing}' is not on this computer yet.\n\n"
+                f"Download it now from Hugging Face (about {spec.approx_mb} MB)? It is stored in your user data "
+                f"folder, checked, and reused for all later transcriptions, also offline.\n\n"
+                f"Progress is shown in Export Queue.")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         try:
             jobs = self.controller.submit_transcription(values["media_ids"], values["language"], values["model"],
-                                                        values["device"])
+                                                        values["device"], allow_download=missing is not None)
         except StudioError as exc:
             QMessageBox.warning(self, "Generate Captions", str(exc))
             return

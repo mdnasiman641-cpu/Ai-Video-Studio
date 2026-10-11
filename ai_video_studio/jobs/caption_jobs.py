@@ -14,6 +14,7 @@ from typing import Callable
 
 from ai_video_studio.ai.providers import JsonProvider, ProviderConfig
 from ai_video_studio.captions.correction import request_corrections
+from ai_video_studio.captions.models import WHISPER_MODELS, ModelMissingError, download_model, installed_path
 from ai_video_studio.captions.transcriber import TranscriptionOptions, transcribe_file
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import MediaError, StudioError
@@ -36,6 +37,7 @@ TRANSCRIBE_JOB = "transcribe"
 BURN_IN_JOB = "burn_in"
 FRAME_PREVIEW_JOB = "caption_frame_preview"
 CORRECTION_JOB = "caption_correction"
+MODEL_DOWNLOAD_JOB = "model_download"
 
 SUBTITLE_FILE = "captions.ass"
 
@@ -78,20 +80,40 @@ def make_transcribe_handler(get_ffmpeg: Callable[[], Path], model_factory=None, 
         options.validate()
         if not Path(p["path"]).is_file():
             raise MediaError(f"Source video not found: {p['path']}")
+        start = 0.0
+        if not options.model_path and model_factory is None:
+            # Use a downloaded model folder; never download without the user's consent.
+            # (A custom model factory, as in tests, loads models by name itself.)
+            folder = installed_path(options.model)
+            if folder is None:
+                spec = WHISPER_MODELS[options.model]
+                if not p.get("allow_download"):
+                    raise ModelMissingError(
+                        f"The Whisper model '{options.model}' (about {spec.approx_mb} MB) is not downloaded yet. "
+                        f"Generate Captions asks before downloading it, or download it in Settings → Speech "
+                        f"recognition models.")
+                folder = download_model(options.model, progress=lambda f, _text: ctx.report_progress(0.4 * f),
+                                        check_cancelled=ctx.check_cancelled)
+                start = 0.4
+            options.model_path = str(folder)
+        span = 1.0 - start
         folder = job_temp_dir(job)
         wav = folder / "audio.wav"
         try:
-            extract_audio(get_ffmpeg(), p["path"], str(wav), p.get("duration"), ctx, weight=0.1)
-            ctx.report_progress(0.1)
+            extract_audio(get_ffmpeg(), p["path"], str(wav), p.get("duration"), ctx, weight=start + 0.1 * span)
+            ctx.report_progress(start + 0.1 * span)
             result = transcribe_file(
                 str(wav), options,
-                progress=lambda f: ctx.report_progress(0.1 + 0.9 * f),
+                progress=lambda f: ctx.report_progress(start + 0.1 * span + 0.9 * span * f),
                 check_cancelled=ctx.check_cancelled,
                 model_factory=model_factory,
                 cuda_devices=cuda_devices,
             )
         finally:
             remove_tree(folder)
+        if p.get("model") and not p.get("model_path"):
+            result.track.source = f"whisper:{p['model']}"
+            result.model = p["model"]
         return {
             "media_id": p.get("media_id"),
             "track": result.track.to_dict(),
@@ -102,6 +124,20 @@ def make_transcribe_handler(get_ffmpeg: Callable[[], Path], model_factory=None, 
             "model": result.model,
             "warnings": result.warnings,
         }
+
+    return handle
+
+
+def make_model_download_handler(opener=None, base_url: str | None = None):
+    """Download a Whisper model (only ever submitted after the user asked for it)."""
+    def handle(job: Job, ctx: JobContext) -> dict:
+        name = job.payload["model"]
+        kwargs = {"opener": opener}
+        if base_url:
+            kwargs["base_url"] = base_url
+        folder = download_model(name, progress=lambda f, _text: ctx.report_progress(min(f, 0.999)),
+                                check_cancelled=ctx.check_cancelled, **kwargs)
+        return {"model": name, "path": str(folder)}
 
     return handle
 

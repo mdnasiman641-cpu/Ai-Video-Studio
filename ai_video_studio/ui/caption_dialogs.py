@@ -123,7 +123,8 @@ class GenerateCaptionsDialog(QDialog):
         gpus = cuda_device_count()
         info = QLabel(
             (f"CUDA devices detected: {gpus}. " if gpus else "No CUDA device detected; the CPU will be used. ")
-            + "The first run downloads the selected model (tiny ≈75 MB … large-v3 ≈3 GB)."
+            + "A model that is not on this computer yet is downloaded only after you confirm "
+              "(tiny ≈75 MB … large-v3 ≈3 GB)."
         )
         info.setWordWrap(True)
         info.setObjectName("Muted")

@@ -14,7 +14,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from ai_video_studio.core.errors import DependencyMissingError, MediaError
-from ai_video_studio.core.paths import app_root
+from ai_video_studio.core.paths import app_root, exe_dir
 from ai_video_studio.core.process import run_process
 
 log = logging.getLogger(__name__)
@@ -30,13 +30,14 @@ def find_tool(name: str, configured_dir: str | None = None) -> Path | None:
     """Find ``ffmpeg`` or ``ffprobe``.
 
     Search order: the directory configured in Settings, a ``bin/`` or ``ffmpeg/bin/``
-    folder shipped next to the application, then ``PATH``.
+    folder shipped next to the application (the packaged build puts FFmpeg in
+    ``<install folder>\\bin``), then ``PATH``.
     """
     candidates: list[Path] = []
     if configured_dir:
         candidates.append(Path(configured_dir) / _exe(name))
-    root = app_root()
-    candidates += [root / "bin" / _exe(name), root / "ffmpeg" / "bin" / _exe(name)]
+    for root in dict.fromkeys((exe_dir(), app_root())):
+        candidates += [root / "bin" / _exe(name), root / "ffmpeg" / "bin" / _exe(name)]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
@@ -48,8 +49,9 @@ def require_tool(name: str, configured_dir: str | None = None) -> Path:
     path = find_tool(name, configured_dir)
     if path is None:
         raise DependencyMissingError(
-            f"{name} was not found. Install FFmpeg (for example 'winget install Gyan.FFmpeg') "
-            f"or set the FFmpeg folder in Settings."
+            f"{name} was not found. The installer and portable package include FFmpeg in the 'bin' "
+            f"folder next to AI-Video-Studio.exe; if it was removed, install FFmpeg (for example "
+            f"'winget install Gyan.FFmpeg') or choose the folder containing {name}.exe in Settings → FFmpeg."
         )
     return path
 

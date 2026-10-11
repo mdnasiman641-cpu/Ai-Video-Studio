@@ -77,7 +77,15 @@ Opener = Callable[[str, float], object]  # (url, timeout) -> file-like response
 
 def ensure_face_model(models_dir: Path, download: bool = True, opener: Opener | None = None,
                       url: str = YUNET_URL, sha256: str = YUNET_SHA256) -> Path | None:
-    """Path to the verified YuNet model, downloading it if needed. ``None`` if unavailable."""
+    """Path to the verified YuNet model, downloading it if needed. ``None`` if unavailable.
+
+    The packaged application ships a verified copy (``<bundle>/models``), so it works offline.
+    """
+    from ai_video_studio.core.paths import app_root
+
+    bundled = app_root() / "models" / YUNET_FILE
+    if bundled.is_file() and sha256_file(bundled) == sha256:
+        return bundled
     target = Path(models_dir) / YUNET_FILE
     if target.is_file():
         if sha256_file(target) == sha256:

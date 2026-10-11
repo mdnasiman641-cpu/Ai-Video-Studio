@@ -18,7 +18,14 @@ from ai_video_studio.core import paths
 from ai_video_studio.core.errors import StudioError
 from ai_video_studio.core.ffmpeg_tools import VideoMetadata
 from ai_video_studio.core.media import MediaItem, MediaStatus, VIDEO_EXTENSIONS, validate_video_path
-from ai_video_studio.jobs.caption_jobs import BURN_IN_JOB, CORRECTION_JOB, FRAME_PREVIEW_JOB, TRANSCRIBE_JOB
+from ai_video_studio.captions.models import WHISPER_MODELS, installed_path
+from ai_video_studio.jobs.caption_jobs import (
+    BURN_IN_JOB,
+    CORRECTION_JOB,
+    FRAME_PREVIEW_JOB,
+    MODEL_DOWNLOAD_JOB,
+    TRANSCRIBE_JOB,
+)
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, REFRAME_EXPORT_JOB, REFRAME_PREVIEW_JOB
@@ -213,7 +220,23 @@ class ProjectController(QObject):
         return [j for j in jobs if j.kind == kind and j.project_id == self.project.id
                 and j.payload.get("media_id") == media_id]
 
-    def submit_transcription(self, media_ids: list[str], language: str, model: str, device: str) -> list[Job]:
+    def model_to_download(self, model: str) -> str | None:
+        """The Whisper model that would have to be downloaded first, or None when it is available."""
+        if self.services.settings.get("whisper_model_dir"):
+            return None  # a local model folder chosen in Settings
+        return None if installed_path(model) is not None else model
+
+    def submit_model_download(self, model: str) -> Job:
+        active = [j for j in self.services.jobs.store.list({JobState.QUEUED, JobState.RUNNING})
+                  if j.kind == MODEL_DOWNLOAD_JOB and j.payload.get("model") == model]
+        if active:
+            return active[0]
+        spec = WHISPER_MODELS[model]
+        return self.services.jobs.submit(MODEL_DOWNLOAD_JOB, f"Download Whisper model: {model} (~{spec.approx_mb} MB)",
+                                         {"model": model})
+
+    def submit_transcription(self, media_ids: list[str], language: str, model: str, device: str,
+                             allow_download: bool = False) -> list[Job]:
         settings = self.services.settings
         jobs = []
         for media_id in media_ids:
@@ -233,6 +256,7 @@ class ProjectController(QObject):
                 "max_chars": settings.get("caption_max_chars"),
                 "max_seconds": settings.get("caption_max_seconds"),
                 "duration": item.metadata.duration if item.metadata else None,
+                "allow_download": allow_download,
             }
             jobs.append(self.services.jobs.submit(TRANSCRIBE_JOB, f"Captions: {item.name}", payload,
                                                   project_id=self.project.id))
