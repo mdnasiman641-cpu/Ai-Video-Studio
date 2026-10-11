@@ -11,11 +11,6 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from ai_video_studio.ui.widgets.common import Card, muted, page_title, section_title
 
 PLANNED_PAGES: dict[str, tuple[int, list[str]]] = {
-    "Smart Cut": (4, [
-        "Audio silence detection with threshold, minimum duration and padding",
-        "Reviewable cut proposals, manual ranges, undo/redo",
-        "Caption remapping and A/V-synchronised segment merge",
-    ]),
     "Resize & Crop": (5, [
         "1920x1080, 1080x1920, 1080x1080 and custom output",
         "Fit, fill, crop, blur background, manual positioning",

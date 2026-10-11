@@ -390,7 +390,15 @@ def remap_to_cuts(segments: list[CaptionSegment], keep_ranges: list[tuple[float,
                 continue
             text = clean_text("".join(w.text for w in words))
         result.append(CaptionSegment(start=_ms(span[0]), end=_ms(span[1]), text=text, id=seg.id, words=words))
-    return result
+    # Mapping is monotonic, but rounding can make neighbours touch or overlap by a millisecond.
+    # Captions that did not overlap before must not overlap after remapping.
+    originals = {s.id: s for s in segments}
+    result.sort(key=lambda s: (s.start, s.end))
+    for a, b in zip(result, result[1:]):
+        oa, ob = originals[a.id], originals[b.id]
+        if b.start < a.end and oa.end <= ob.start + 1e-6:
+            a.end = b.start
+    return [s for s in result if s.end - s.start >= MIN_SEGMENT_DURATION]
 
 
 # -- time entry ---------------------------------------------------------------

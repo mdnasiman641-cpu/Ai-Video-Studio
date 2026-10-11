@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from ai_video_studio.core import paths
+from ai_video_studio.core.errors import StudioError
 from ai_video_studio.core.ffmpeg_tools import find_tool, require_tool, tool_version
 from ai_video_studio.jobs.caption_jobs import (
     BURN_IN_JOB,
@@ -30,7 +32,14 @@ from ai_video_studio.jobs.reframe_jobs import (
     make_reframe_export_handler,
     make_reframe_preview_handler,
 )
+from ai_video_studio.jobs.render_jobs import (
+    RENDER_JOB,
+    SMARTCUT_ANALYZE_JOB,
+    make_render_handler,
+    make_smartcut_analyze_handler,
+)
 from ai_video_studio.jobs.store import JobStore
+from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.storage.database import Database
 from ai_video_studio.storage import secrets
 from ai_video_studio.storage.presets import PresetStore
@@ -68,6 +77,8 @@ class Services:
         self.jobs.register(REFRAME_ANALYZE_JOB, make_reframe_analyze_handler(self.ffmpeg_path))
         self.jobs.register(REFRAME_EXPORT_JOB, make_reframe_export_handler(self.ffmpeg_path))
         self.jobs.register(REFRAME_PREVIEW_JOB, make_reframe_preview_handler(self.ffmpeg_path))
+        self.jobs.register(SMARTCUT_ANALYZE_JOB, make_smartcut_analyze_handler(self.ffmpeg_path))
+        self.jobs.register(RENDER_JOB, make_render_handler(self.ffmpeg_path))
         self.settings.subscribe(self._on_setting_changed)
 
     def ffprobe_path(self) -> Path:
@@ -75,6 +86,23 @@ class Services:
 
     def ffmpeg_path(self) -> Path:
         return require_tool("ffmpeg", self.settings.get("ffmpeg_dir"))
+
+    def output_defaults(self) -> OutputSettings:
+        """Export settings for edited exports: the last ones used, else based on Settings → Export."""
+        raw = self.settings.get("export_output_settings")
+        if raw:
+            try:
+                settings = OutputSettings.from_dict(json.loads(raw))
+                settings.validate()
+                return settings
+            except (ValueError, TypeError, StudioError):
+                pass
+        encoder = {"h264_nvenc": "gpu", "libx264": "cpu"}.get(self.settings.get("video_encoder"), "auto")
+        return OutputSettings(encoder=encoder, quality="custom", crf=self.settings.get("video_quality"))
+
+    def remember_output_settings(self, settings: OutputSettings) -> None:
+        settings.validate()
+        self.settings.set("export_output_settings", json.dumps(settings.to_dict()))
 
     def ai_correction_config(self) -> tuple[str, str] | None:
         """``(provider, model)`` when AI correction is enabled and has a key, else ``None``."""

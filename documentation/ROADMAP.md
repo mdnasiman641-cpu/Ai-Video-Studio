@@ -37,7 +37,8 @@ Phase 1 adds no other dependencies. Planned additions, each checked for compatib
 1. **Foundation**: done (see README).
 2. **Captions**: done (v0.2.0). Windows-readiness verification done in v0.2.1 (see below).
 3. **Tracking/reframe**: done (v0.3.0). See "Phase 3" below.
-4. to 9.: not started; listed under "Remaining phases".
+4. **Smart Cut**: done (v0.7.0). See "Phase 4" below.
+5. to 9.: see the sections below and "Remaining phases".
 
 ## Phase 2 verification (v0.2.1, GitHub Actions `windows-latest` + `ubuntu-latest`)
 
@@ -230,9 +231,46 @@ every packaged-app check in the README table passed.
 - an update notification;
 - a tested GPU build.
 
+## Phase 4: Smart Cut (v0.7.0)
+
+**Design**
+- Audio levels are measured once by FFmpeg (`astats`, 25 ms windows, peak and RMS, all channels
+  combined), in a background job.
+- Silence detection then runs in Python on the stored levels, so threshold and padding changes
+  update the proposal instantly. A window is silent when its peak is below the threshold, which
+  matches `silencedetect`.
+- Settings: threshold, minimum silence, padding before and after speech, minimum kept sound,
+  optional merge gap. "Suggest Threshold" estimates the background and speech levels.
+- Warnings are shown when nothing is below the threshold (music or noise) or when most of the
+  clip is (quiet dialogue).
+- The proposal is a full partition of the clip into speech and silence segments. The user keeps
+  or removes segments, edits boundaries in the table, and can undo and redo every change.
+- **Apply Cuts** stores the keep ranges in the project. Exports use only applied cuts. Source
+  files and caption tracks are never changed.
+- Export: one `render_video` job with `trim`/`atrim` per kept range, `split`/`asplit`, `concat`,
+  and cut points snapped to the frame grid. Graphs longer than 6000 characters go to
+  `-filter_complex_script`. H.264 or H.265, CPU or NVENC (with a test encode and CPU fallback),
+  quality or target bitrate, frame rate, AAC audio.
+- Outputs:
+  - written to `.part` files first;
+  - never the source; existing files are replaced only when the user confirms;
+  - two jobs never write the same file.
+- Captions are remapped to the edited timeline at export time (burn-in and SRT):
+  - captions inside removed parts are dropped and reported;
+  - captions crossing a cut are clipped;
+  - no negative times or new overlaps.
+
+**Verified (Linux, real FFmpeg):** silence positions on a generated clip, and A/V sync after three
+cuts. Every tone onset matches the white-frame onset within 45 ms, and the output duration equals
+the kept duration. Also: cancel (no partial file), FFmpeg failure messages, video without audio,
+output protection, H.265 export, and the GUI flow from analyse to export, SRT and project reopen.
+
+**Not verified:** real recordings (music beds, noisy rooms), long videos on the user's PC, and
+NVENC on the RTX 4070.
+
 ## Remaining phases
 
-Next phase (not started): **Phase 4, silence removal and manual cutting.**
+Phases 4–7 are implemented in v0.7.0 (see their sections). Remaining: 8 and 9.
 
 4. **Smart cut**: `silencedetect` parsing, cut-proposal model, accept/reject, manual ranges,
    undo/redo stack, keep-segment merge, caption remapping, and frame-accurate export with

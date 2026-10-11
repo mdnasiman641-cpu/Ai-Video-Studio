@@ -2,7 +2,43 @@
 
 All notable changes are listed here. Versions follow semantic versioning.
 
-## [0.3.2] - Unreleased
+## [0.7.0] - Unreleased
+
+Phases 4 to 7: Smart Cut, Resize & Crop, Bulk Processing and the AI provider manager.
+
+### Added — Phase 4: Smart Cut
+- **Smart Cut page**, replacing the placeholder:
+  - analyse the audio, with progress and cancel;
+  - silence settings (threshold, minimum silence, padding before and after speech, minimum
+    kept sound, merge gap), plus Suggest Threshold;
+  - a timeline with levels, segments, threshold and playhead;
+  - a segment table with Keep/Remove, editable boundaries, select all/none, and undo/redo;
+  - Preview Segment, and "Play edited result" (skips removed parts);
+  - Apply Cuts and Reset Analysis;
+  - original, proposed and exported durations;
+  - Export Preview (360p), Export Video and Export SRT (edited timeline);
+  - export status with Cancel, Retry and Open Output Folder.
+- **Audio analysis job** (`smartcut_analyze`): FFmpeg `astats` levels in 25 ms windows, stored
+  compactly in the project. Handles videos without audio, audio that starts late or is shorter
+  than the video, multiple channels and digital silence.
+- **Edited export job** (`render_video`), shared with Resize & Crop and Bulk Processing:
+  - frame-accurate `trim`/`concat` cuts with frame-snapped boundaries;
+  - H.264 or H.265 (CPU or NVENC) and constant quality or target bitrate;
+  - output frame rate; AAC audio, or copying it unchanged when nothing is cut;
+  - optionally all audio tracks;
+  - `.part` output files and duplicate-output protection.
+- **Captions on the edited timeline**: burn-in and SRT export use remapped captions. Remapping
+  never creates negative times or new overlaps, and the caption track keeps its own timing.
+- Settings → Export: default settings for edited exports (the last used settings are remembered).
+- Export Queue: Open Output Folder; labels for every job type.
+
+### Changed
+- Project format version 5 (adds the optional `smart_cut` and `resize` entries per video).
+  Older projects open unchanged.
+- `EncoderSettings` supports libx265, hevc_nvenc and target bitrates. NVENC availability is
+  tested per encoder.
+
+## [0.3.2]
 
 Windows packaging: the app can be installed and run without Python. No new editing features.
 

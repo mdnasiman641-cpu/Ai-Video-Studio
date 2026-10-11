@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -33,6 +35,7 @@ from ai_video_studio.core.errors import SettingsError, StudioError
 from ai_video_studio.storage import secrets
 from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
 from ai_video_studio.services import Services
+from ai_video_studio.ui.widgets.output_settings import OutputSettingsForm
 from ai_video_studio.ui.widgets.common import Card, muted, open_folder, page_title, section_title
 from ai_video_studio.ui.widgets.tracking_options import TrackingOptions
 
@@ -250,6 +253,12 @@ class SettingsPage(QWidget):
         eform.addRow("Video encoder:", self.video_encoder)
         eform.addRow("Quality (CRF/CQ):", self.video_quality)
         export.body.addLayout(eform)
+        export.body.addSpacing(8)
+        export.body.addWidget(section_title("Edited exports (Smart Cut, Resize & Crop, Bulk Processing)"))
+        export.body.addWidget(muted("Default settings shown in the export dialogs. The settings used for the last "
+                                    "export are remembered here."))
+        self.output_form = OutputSettingsForm()
+        export.body.addWidget(self.output_form)
 
         # Tracking (auto reframe defaults)
         self.tracking = TrackingOptions()
@@ -376,11 +385,18 @@ class SettingsPage(QWidget):
             "caption_max_seconds": self.caption_max_seconds.value(),
             "video_encoder": self.video_encoder.currentData(),
             "video_quality": self.video_quality.value(),
+            "export_output_settings": self._output_json(),
             "ai_correction_provider": self.ai_provider.currentData(),
             "gemini_model": self.gemini_model.text(),
             "openai_model": self.openai_model.text(),
             "ai_timeout_seconds": self.ai_timeout.value(),
         } | {key: self.tracking.values()[field] for key, field in REFRAME_DEFAULT_KEYS.items()}
+
+    def _output_json(self) -> str:
+        try:
+            return json.dumps(self.output_form.settings().to_dict())
+        except StudioError as exc:
+            return f"invalid: {exc}"  # rejected by validation when saving
 
     def load(self) -> None:
         s = self.services.settings
@@ -399,6 +415,7 @@ class SettingsPage(QWidget):
         self.caption_max_seconds.setValue(s.get("caption_max_seconds"))
         self.video_encoder.setCurrentIndex(self.video_encoder.findData(s.get("video_encoder")))
         self.video_quality.setValue(s.get("video_quality"))
+        self.output_form.set_settings(self.services.output_defaults())
         self.ai_provider.setCurrentIndex(self.ai_provider.findData(s.get("ai_correction_provider")))
         self.gemini_model.setText(s.get("gemini_model"))
         self.openai_model.setText(s.get("openai_model"))

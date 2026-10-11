@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from ai_video_studio.core.errors import SettingsError
+from ai_video_studio.core.errors import SettingsError, StudioError
 from ai_video_studio.core.paths import default_projects_dir
 from ai_video_studio.storage.database import Database
 
@@ -36,6 +36,18 @@ def _non_empty(value: str) -> str | None:
 
 def _choice(*options: str) -> Callable[[Any], str | None]:
     return lambda v: None if v in options else f"must be one of {', '.join(options)}"
+
+
+def _output_settings_json(value: str) -> str | None:
+    if not value:
+        return None
+    try:
+        from ai_video_studio.render.output import OutputSettings
+
+        OutputSettings.from_dict(json.loads(value)).validate()
+    except (ValueError, TypeError, StudioError) as exc:
+        return f"invalid export settings ({exc})"
+    return None
 
 
 def _float_range(low: float, high: float) -> Callable[[Any], str | None]:
@@ -67,6 +79,8 @@ SETTINGS: dict[str, SettingSpec] = {
     # Export
     "video_encoder": SettingSpec(str, "auto", "Video encoder", _choice("auto", "h264_nvenc", "libx264")),
     "video_quality": SettingSpec(int, 20, "Video quality (CRF/CQ)", _int_range(10, 40)),
+    # Last export settings used for edited exports (Smart Cut, Resize & Crop), as JSON
+    "export_output_settings": SettingSpec(str, "", "Export settings", _output_settings_json),
     # Optional AI caption correction (off unless a provider is chosen)
     "ai_correction_provider": SettingSpec(str, "none", "AI correction provider", _choice("none", "gemini", "openai")),
     "gemini_model": SettingSpec(str, "gemini-2.5-flash", "Gemini model", _non_empty),

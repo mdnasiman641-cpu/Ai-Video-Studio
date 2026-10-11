@@ -8,11 +8,16 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from ai_video_studio.core.errors import StudioError
 from ai_video_studio.core.process import run_process
 
 log = logging.getLogger(__name__)
 
 VIDEO_ENCODERS = ("auto", "h264_nvenc", "libx264")
+
+
+class EncoderUnavailableError(StudioError):
+    """The requested codec cannot be encoded with this FFmpeg build and hardware."""
 
 
 def audio_extract_args(ffmpeg: Path | str, source: str, output_wav: str) -> list[str]:
@@ -27,19 +32,39 @@ def audio_extract_args(ffmpeg: Path | str, source: str, output_wav: str) -> list
     ]
 
 
+CPU_ENCODERS = {"h264": "libx264", "h265": "libx265"}
+GPU_ENCODERS = {"h264": "h264_nvenc", "h265": "hevc_nvenc"}
+# ``EncoderSettings.quality`` uses the libx264 CRF scale. H.265 reaches similar visual quality
+# at a higher CRF/CQ value, so it is offset to keep the quality presets comparable.
+QUALITY_OFFSET = {"libx264": 0, "h264_nvenc": 0, "libx265": 4, "hevc_nvenc": 4}
+
+
 @dataclass(frozen=True)
 class EncoderSettings:
-    codec: str = "libx264"   # libx264 | h264_nvenc
-    quality: int = 20        # CRF (libx264) or CQ (NVENC); lower = better quality, larger file
+    codec: str = "libx264"   # libx264 | h264_nvenc | libx265 | hevc_nvenc
+    quality: int = 20        # CRF (libx264 scale) or CQ; lower = better quality, larger file
     audio_bitrate: str = "192k"
+    bitrate_kbps: int | None = None  # target bitrate instead of constant quality
 
     def video_args(self) -> list[str]:
-        if self.codec == "h264_nvenc":
-            return ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr",
-                    "-cq", str(self.quality), "-b:v", "0", "-pix_fmt", "yuv420p"]
-        if self.codec == "libx264":
-            return ["-c:v", "libx264", "-preset", "medium", "-crf", str(self.quality), "-pix_fmt", "yuv420p"]
-        raise ValueError(f"Unsupported video encoder {self.codec!r}")
+        if self.codec not in QUALITY_OFFSET:
+            raise ValueError(f"Unsupported video encoder {self.codec!r}")
+        q = str(self.quality + QUALITY_OFFSET[self.codec])
+        rate = []
+        if self.bitrate_kbps:
+            b = int(self.bitrate_kbps)
+            rate = ["-b:v", f"{b}k", "-maxrate", f"{int(b * 1.5)}k", "-bufsize", f"{b * 2}k"]
+        if self.codec in ("h264_nvenc", "hevc_nvenc"):
+            args = ["-c:v", self.codec, "-preset", "p5", "-tune", "hq", "-rc", "vbr"]
+            args += rate or ["-cq", q, "-b:v", "0"]
+        else:
+            args = ["-c:v", self.codec, "-preset", "medium"] + (rate or ["-crf", q])
+            if self.codec == "libx265":
+                args += ["-x265-params", "log-level=error"]
+        args += ["-pix_fmt", "yuv420p"]
+        if self.codec in ("libx265", "hevc_nvenc"):
+            args += ["-tag:v", "hvc1"]  # lets Apple players and editors recognise H.265 in MP4
+        return args
 
 
 UNSAFE_FILTER_FILENAME = "/\\:'[],;="
@@ -161,37 +186,68 @@ def available_encoders(ffmpeg: Path | str) -> set[str]:
     return names
 
 
-def nvenc_usable(ffmpeg: Path | str) -> bool:
-    """True if this FFmpeg build has h264_nvenc AND a short test encode succeeds.
+def nvenc_usable(ffmpeg: Path | str, encoder: str = "h264_nvenc") -> bool:
+    """True if this FFmpeg build has ``encoder`` (an NVENC encoder) AND a short test encode succeeds.
 
     Being listed in ``-encoders`` only means support was compiled in; the test encode
     proves a compatible NVIDIA GPU and driver are present. The result is cached.
     """
-    key = str(ffmpeg)
+    key = f"{ffmpeg}|{encoder}"
     with _cache_lock:
         if key in _encoder_cache:
             return _encoder_cache[key]
     ok = False
     try:
-        if "h264_nvenc" in available_encoders(ffmpeg):
+        if encoder in available_encoders(ffmpeg):
             test = run_process([str(ffmpeg), "-hide_banner", "-nostdin", "-f", "lavfi",
-                                "-i", "color=c=black:s=256x256:d=0.2", "-c:v", "h264_nvenc",
+                                "-i", "color=c=black:s=256x256:d=0.2", "-c:v", encoder,
                                 "-f", "null", "-"], timeout=30)
             ok = test.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         ok = False
-    log.info("NVENC availability checked", extra={"ffmpeg": key, "usable": ok})
+    log.info("NVENC availability checked", extra={"ffmpeg": str(ffmpeg), "encoder": encoder, "usable": ok})
     with _cache_lock:
         _encoder_cache[key] = ok
     return ok
 
 
-def choose_video_encoder(preference: str, ffmpeg: Path | str) -> tuple[str, str]:
-    """Return ``(codec, reason)`` for the user's preference (auto | h264_nvenc | libx264)."""
-    if preference == "libx264":
-        return "libx264", "CPU encoder selected in Settings"
-    if nvenc_usable(ffmpeg):
-        return "h264_nvenc", "NVIDIA NVENC"
-    if preference == "h264_nvenc":
-        return "libx264", "NVENC was requested but is not usable on this system; using CPU (libx264)"
-    return "libx264", "NVENC not available; using CPU (libx264)"
+def _gpu_usable(ffmpeg: Path | str, family: str) -> bool:
+    return nvenc_usable(ffmpeg) if family == "h264" else nvenc_usable(ffmpeg, GPU_ENCODERS[family])
+
+
+def cpu_encoder_available(ffmpeg: Path | str, family: str) -> bool:
+    if family == "h264":
+        return True  # libx264 is required by the app (caption burn-in, reframe export)
+    try:
+        return CPU_ENCODERS[family] in available_encoders(ffmpeg)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def choose_video_encoder(preference: str, ffmpeg: Path | str, family: str = "h264") -> tuple[str, str]:
+    """Return ``(encoder, reason)``.
+
+    ``preference`` is auto | gpu | cpu (``h264_nvenc`` / ``libx264`` are accepted as the
+    older names for gpu / cpu); ``family`` is h264 | h265. NVENC is only used when a test
+    encode proved it works. Raises ``EncoderUnavailableError`` when the codec cannot be
+    encoded at all (H.265 without libx265 and without a usable NVENC).
+    """
+    if family not in CPU_ENCODERS:
+        raise ValueError(f"Unknown codec {family!r}")
+    cpu, gpu = CPU_ENCODERS[family], GPU_ENCODERS[family]
+    label = "H.264" if family == "h264" else "H.265"
+    if preference in ("libx264", "cpu"):
+        if cpu_encoder_available(ffmpeg, family):
+            return cpu, "CPU encoder selected in Settings"
+        if _gpu_usable(ffmpeg, family):
+            return gpu, f"{cpu} is not in this FFmpeg build; using NVIDIA NVENC"
+        raise EncoderUnavailableError(f"{label} cannot be encoded: this FFmpeg build has no {cpu} and NVENC "
+                                      f"is not usable. Choose H.264 or use an FFmpeg build with {cpu}.")
+    if _gpu_usable(ffmpeg, family):
+        return gpu, "NVIDIA NVENC"
+    if not cpu_encoder_available(ffmpeg, family):
+        raise EncoderUnavailableError(f"{label} cannot be encoded: NVENC is not usable and this FFmpeg build "
+                                      f"has no {cpu}. Choose H.264.")
+    if preference in ("h264_nvenc", "gpu"):
+        return cpu, f"NVENC was requested but is not usable on this system; using CPU ({cpu})"
+    return cpu, f"NVENC not available; using CPU ({cpu})"

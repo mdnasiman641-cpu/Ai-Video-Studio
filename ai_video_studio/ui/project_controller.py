@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 from ai_video_studio.captions.ass import build_ass
-from ai_video_studio.captions.model import CaptionTrack
+from ai_video_studio.captions.model import CaptionSegment, CaptionTrack, remap_to_cuts
 from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import StudioError
@@ -29,6 +29,10 @@ from ai_video_studio.jobs.caption_jobs import (
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, REFRAME_EXPORT_JOB, REFRAME_PREVIEW_JOB
+from ai_video_studio.jobs.render_jobs import RENDER_JOB, SMARTCUT_ANALYZE_JOB, output_key
+from ai_video_studio.render.output import OutputSettings
+from ai_video_studio.smartcut.levels import AudioLevels
+from ai_video_studio.smartcut.model import SmartCutState
 from ai_video_studio.reframe.framing import CropPath, caption_band_from_style, compute_crop_path, resolve_output_size
 from ai_video_studio.reframe.model import ReframeSettings, ReframeState, TrackingAnalysis
 from ai_video_studio.services import Services
@@ -86,6 +90,8 @@ class ProjectController(QObject):
     corrections_ready = Signal(str)     # media id: AI suggestions are waiting for review
     reframe_changed = Signal(str)       # media id: reframe settings or tracking results changed
     reframe_analysis_finished = Signal(str, object)  # media id, job (completed, failed or cancelled)
+    smartcut_changed = Signal(str)      # media id: cut proposal, settings or applied cuts changed
+    smartcut_analysis_finished = Signal(str, object)  # media id, job
 
     def __init__(self, services: Services, bridge: JobBridge, parent: QObject | None = None):
         super().__init__(parent)
@@ -106,6 +112,7 @@ class ProjectController(QObject):
         self.probe_pending()
         self._recover_transcriptions()
         self._recover_reframe_analyses()
+        self._recover_smartcut_analyses()
         return project
 
     def save_project(self, path: str | Path | None = None) -> Path:
@@ -336,6 +343,9 @@ class ProjectController(QObject):
         if job.kind == REFRAME_ANALYZE_JOB:
             self._on_reframe_analysis(job)
             return
+        if job.kind == SMARTCUT_ANALYZE_JOB:
+            self._on_smartcut_analysis(job)
+            return
         if job.kind != PROBE_JOB:
             return
         item = self.project.find_media(job.payload.get("media_id", ""))
@@ -542,3 +552,140 @@ class ProjectController(QObject):
                 log.info("Recovered tracking analysis", extra={"job_id": job.id, "media_id": item.id})
         if self.project.dirty:
             self.dirty_changed.emit(True)
+
+    # -- smart cut ---------------------------------------------------------------------
+    def smartcut_state(self, media_id: str) -> SmartCutState:
+        item = self.media(media_id)
+        return item.smart_cut if item.smart_cut is not None else SmartCutState()
+
+    def set_smartcut_state(self, media_id: str, state: SmartCutState) -> None:
+        state.settings.validate()
+        self.media(media_id).smart_cut = state
+        self.project.dirty = True
+        self.smartcut_changed.emit(media_id)
+        self.dirty_changed.emit(True)
+
+    def clear_smartcut(self, media_id: str) -> None:
+        """Forget the audio analysis, proposal and applied cuts (the video file is not affected)."""
+        self.media(media_id).smart_cut = None
+        self.project.dirty = True
+        self.smartcut_changed.emit(media_id)
+        self.dirty_changed.emit(True)
+
+    @staticmethod
+    def smartcut_is_stale(item: MediaItem) -> bool:
+        """True if the source file changed since its audio was analysed."""
+        levels = item.smart_cut.levels if item.smart_cut else None
+        if levels is None or levels.source_size is None:
+            return False
+        try:
+            stat = Path(item.path).stat()
+        except OSError:
+            return False
+        return stat.st_size != levels.source_size or abs(round(stat.st_mtime, 3) - (levels.source_mtime or 0)) > 1
+
+    def submit_smartcut_analysis(self, media_id: str) -> Job:
+        item = self.media(media_id)
+        if item.status is MediaStatus.MISSING:
+            raise StudioError(f"{item.name}: the source file is missing.")
+        if item.metadata is None:
+            raise StudioError("Video information has not been read yet.")
+        if not item.metadata.has_audio:
+            raise StudioError("This video has no audio track, so Smart Cut cannot detect silence in it.")
+        active = self.active_jobs(media_id, SMARTCUT_ANALYZE_JOB)
+        if active:
+            return active[0]
+        payload = {"path": item.path, "media_id": media_id, "duration": item.metadata.duration,
+                   "has_audio": item.metadata.has_audio}
+        return self.services.jobs.submit(SMARTCUT_ANALYZE_JOB, f"Analyse audio levels: {item.name}", payload,
+                                         project_id=self.project.id)
+
+    def _apply_levels(self, item: MediaItem, data: dict) -> None:
+        state = item.smart_cut or SmartCutState()
+        state.levels = AudioLevels.from_dict(data)
+        state.detect()
+        item.smart_cut = state
+        self.project.dirty = True
+
+    def _on_smartcut_analysis(self, job: Job) -> None:
+        media_id = job.payload.get("media_id", "")
+        item = self.project.find_media(media_id)
+        if item is None or not job.state.is_finished:
+            return
+        if job.state is JobState.COMPLETED and job.result and job.result.get("levels"):
+            self._apply_levels(item, job.result["levels"])
+            self.smartcut_changed.emit(media_id)
+            self.dirty_changed.emit(True)
+        self.smartcut_analysis_finished.emit(media_id, job)
+
+    def _recover_smartcut_analyses(self) -> None:
+        """Apply audio analyses that finished while the project was closed (only where none is stored)."""
+        for job in self.services.jobs.store.list({JobState.COMPLETED}):
+            if job.kind != SMARTCUT_ANALYZE_JOB or job.project_id != self.project.id or not job.result:
+                continue
+            item = self.project.find_media(job.result.get("media_id", ""))
+            if item is not None and (item.smart_cut is None or item.smart_cut.levels is None):
+                self._apply_levels(item, job.result["levels"])
+        if self.project.dirty:
+            self.dirty_changed.emit(True)
+
+    def applied_cuts(self, media_id: str) -> list[tuple[float, float]] | None:
+        """The applied Smart Cut keep ranges when they cut something, else None."""
+        item = self.media(media_id)
+        return item.smart_cut.cut_ranges() if item.smart_cut else None
+
+    def edited_captions(self, media_id: str, keep: list[tuple[float, float]] | None) -> list[CaptionSegment]:
+        """The video's captions on the edited timeline (the caption track itself is not changed)."""
+        item = self.media(media_id)
+        if not item.captions or not item.captions.segments:
+            return []
+        segments = item.captions.segments
+        return remap_to_cuts(segments, keep) if keep else [CaptionSegment.from_dict(s.to_dict()) for s in segments]
+
+    def active_outputs(self) -> dict[str, Job]:
+        """Output files that queued or running exports will write."""
+        jobs = self.services.jobs.store.list({JobState.QUEUED, JobState.RUNNING})
+        return {output_key(j.payload["output"]): j for j in jobs if j.payload.get("output")}
+
+    def check_output(self, source: str, output: str, overwrite: bool) -> None:
+        if output_key(output) == output_key(source):
+            raise StudioError("Choose a different file name: the source video is never overwritten.")
+        if output_key(output) in self.active_outputs():
+            raise StudioError(f"{Path(output).name} is already being written by another export in the queue.")
+        if Path(output).exists() and not overwrite:
+            raise StudioError(f"{Path(output).name} already exists.")
+
+    def submit_render(self, media_id: str, output: str, settings: OutputSettings, *, use_cuts: bool = True,
+                      burn_captions: bool = False, stage: dict | None = None, canvas: tuple[int, int] | None = None,
+                      overwrite: bool = False, title: str | None = None, preview: bool = False) -> Job:
+        """Queue an edited export. ``stage``/``canvas`` describe resizing (None = source size)."""
+        item = self.media(media_id)
+        if item.status is MediaStatus.MISSING:
+            raise StudioError(f"{item.name}: the source file is missing.")
+        if item.metadata is None:
+            raise StudioError("Video information has not been read yet.")
+        settings.validate()
+        self.check_output(item.path, output, overwrite)
+        meta = item.metadata
+        keep = self.applied_cuts(media_id) if use_cuts else None
+        if keep and self.smartcut_is_stale(item):
+            raise StudioError("The source file changed after its audio was analysed. Analyse it again in Smart Cut "
+                              "before exporting with cuts.")
+        out_w, out_h = canvas or (meta.display_width, meta.display_height)
+        ass = None
+        if burn_captions:
+            segments = self.edited_captions(media_id, keep)
+            if not segments:
+                raise StudioError("There are no captions to burn in (none exist, or all are in removed parts).")
+            ass = build_ass(segments, item.effective_caption_style, out_w, out_h, title=item.name)
+        if preview:
+            stage = {"type": "scale", "height": 360}
+            ass = None
+        payload = {
+            "path": item.path, "media_id": media_id, "output": output, "overwrite": overwrite,
+            "duration": meta.duration, "fps": meta.fps, "has_audio": meta.has_audio,
+            "audio_codec": meta.audio_codec, "keep_ranges": [list(r) for r in keep] if keep else None,
+            "stage": stage, "ass": ass, "output_settings": settings.to_dict(), "preview": preview,
+        }
+        return self.services.jobs.submit(RENDER_JOB, title or f"Export edited video: {item.name}", payload,
+                                         project_id=self.project.id)

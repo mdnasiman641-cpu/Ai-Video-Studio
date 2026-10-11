@@ -126,7 +126,7 @@ def test_project_saves_and_reopens_reframe_data(tmp_path):
     item.reframe = ReframeState(ReframeSettings(preset="1:1", target=1, switches=[[1.0, None]], zoom=1.3), analysis)
     path = project.save(tmp_path / "p.avsproj")
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["version"] == 4 and data["media"][0]["reframe"]["settings"]["preset"] == "1:1"
+    assert data["version"] == 5 and data["media"][0]["reframe"]["settings"]["preset"] == "1:1"
     loaded = Project.load(path).media[0]
     assert loaded.reframe.settings.target == 1 and loaded.reframe.settings.zoom == 1.3
     assert loaded.reframe.analysis.tracks[0].id == 1

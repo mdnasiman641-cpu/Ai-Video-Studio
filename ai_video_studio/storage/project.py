@@ -25,7 +25,9 @@ PROJECT_FORMAT = "ai-video-studio-project"
 #   3 - Phase 3: per-media "reframe" (settings + cached tracking analysis, optional key)
 #   4 - Phase 3 upgrade: reframe "tracking_mode" (replaces "mode") and new tracking options;
 #       analyses may contain speech, mouth movement and appearance data
-PROJECT_VERSION = 4
+#   5 - Phases 4-5: per-media "smart_cut" (audio levels, cut proposal, applied cuts) and
+#       "resize" (output canvas settings); both optional, so version 1-4 files load unchanged
+PROJECT_VERSION = 5
 
 
 @dataclass

@@ -20,7 +20,7 @@ from ai_video_studio.core.errors import StudioError
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.services import Services
 from ai_video_studio.ui.project_controller import JobBridge
-from ai_video_studio.ui.widgets.common import muted, page_title
+from ai_video_studio.ui.widgets.common import muted, page_title, reveal_in_explorer
 
 HISTORY_LIMIT = 500  # rows shown; older finished jobs stay in the database until cleared
 COLUMNS = ["Job", "State", "Progress", "Attempts", "Created", "Finished", "Message"]
@@ -30,6 +30,12 @@ KIND_LABELS = {
     "burn_in": "Export",
     "caption_frame_preview": "Preview",
     "caption_correction": "AI check",
+    "model_download": "Download",
+    "reframe_analyze": "Analysis",
+    "reframe_export": "Export",
+    "reframe_frame_preview": "Preview",
+    "smartcut_analyze": "Analysis",
+    "render_video": "Export",
 }
 
 
@@ -49,10 +55,11 @@ class QueuePage(QWidget):
         self.cancel_button = QPushButton("Cancel Selected")
         self.retry_button = QPushButton("Retry Selected")
         self.clear_button = QPushButton("Clear Finished")
+        self.open_button = QPushButton("Open Output Folder")
         self.summary = muted("", wrap=False)
 
         toolbar = QHBoxLayout()
-        for b in (self.pause_button, self.cancel_button, self.retry_button, self.clear_button):
+        for b in (self.pause_button, self.cancel_button, self.retry_button, self.clear_button, self.open_button):
             toolbar.addWidget(b)
         toolbar.addStretch(1)
         toolbar.addWidget(self.summary)
@@ -73,7 +80,8 @@ class QueuePage(QWidget):
         layout.addWidget(page_title("Export Queue"))
         layout.addWidget(muted(
             "Background jobs run here. Queued jobs are kept across restarts; jobs interrupted by "
-            "closing the app are marked failed and can be retried. Rendering jobs are added in later phases."
+            "closing the app are marked failed and can be retried. An export writes to a temporary .part file "
+            "and replaces the output only when it has finished, so an interrupted export never leaves a broken video."
         ))
         layout.addLayout(toolbar)
         layout.addWidget(self.table, 1)
@@ -82,6 +90,7 @@ class QueuePage(QWidget):
         self.cancel_button.clicked.connect(self.cancel_selected)
         self.retry_button.clicked.connect(self.retry_selected)
         self.clear_button.clicked.connect(self.clear_finished)
+        self.open_button.clicked.connect(self.open_output_folder)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         bridge.job_changed.connect(self.on_job_changed)
         self.reload()
@@ -103,6 +112,13 @@ class QueuePage(QWidget):
     def clear_finished(self) -> None:
         self.services.jobs.store.delete_finished()
         self.reload()
+
+    def open_output_folder(self) -> None:
+        for job in self.selected_jobs():
+            output = (job.result or {}).get("output")
+            if job.state is JobState.COMPLETED and output:
+                reveal_in_explorer(output)
+                return
 
     def _apply(self, action, allowed: set[JobState]) -> None:
         errors = []
@@ -186,6 +202,7 @@ class QueuePage(QWidget):
         states = {j.state for j in jobs}
         self.cancel_button.setEnabled(bool(states & {JobState.QUEUED, JobState.RUNNING}))
         self.retry_button.setEnabled(bool(states & {JobState.FAILED, JobState.CANCELLED}))
+        self.open_button.setEnabled(any(j.state is JobState.COMPLETED and (j.result or {}).get("output") for j in jobs))
         self.pause_button.setText("Resume Queue" if self.services.jobs.paused else "Pause Queue")
         counts = self.services.jobs.store.counts()
         self.clear_button.setEnabled(any(counts[s] for s in JobState if s.is_finished))
