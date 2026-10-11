@@ -42,23 +42,33 @@ class EncoderSettings:
         raise ValueError(f"Unsupported video encoder {self.codec!r}")
 
 
-def burn_in_args(
+UNSAFE_FILTER_FILENAME = "/\\:'[],;="
+
+
+def check_filter_filename(name: str) -> None:
+    """File names inside filter arguments must be plain names in the working directory.
+
+    This avoids FFmpeg filter-argument escaping of Windows paths (``C:\\...``), which is a
+    common source of failures.
+    """
+    if not name or any(ch in name for ch in UNSAFE_FILTER_FILENAME):
+        raise ValueError("filter file names must be plain file names")
+
+
+def encode_args(
     ffmpeg: Path | str,
     source: str,
-    subtitle_filename: str,
+    video_filter: str,
     output: str,
     encoder: EncoderSettings,
     source_audio_codec: str | None,
     has_audio: bool,
 ) -> list[str]:
-    """Re-encode ``source`` with subtitles rendered by libass.
+    """Re-encode the first video stream of ``source`` through ``video_filter``; keep the first audio stream.
 
-    ``subtitle_filename`` must be a bare file name in the process working directory: this
-    avoids FFmpeg filter-argument escaping of Windows paths (``C:\\...``), which is a
-    common source of failures.
+    AAC audio is copied unchanged; other audio is converted to AAC. Timestamps are kept,
+    so the frame rate and audio/video synchronisation of the source are preserved.
     """
-    if any(ch in subtitle_filename for ch in "/\\:'[],;="):
-        raise ValueError("subtitle_filename must be a plain file name")
     args = [
         str(ffmpeg), "-hide_banner", "-nostdin", "-y",
         "-i", str(source),
@@ -66,7 +76,7 @@ def burn_in_args(
     ]
     if has_audio:
         args += ["-map", "0:a:0?"]
-    args += ["-vf", f"subtitles={subtitle_filename}"]
+    args += ["-vf", video_filter]
     args += encoder.video_args()
     if has_audio:
         if source_audio_codec == "aac":
@@ -78,14 +88,32 @@ def burn_in_args(
     return args
 
 
+def burn_in_args(
+    ffmpeg: Path | str,
+    source: str,
+    subtitle_filename: str,
+    output: str,
+    encoder: EncoderSettings,
+    source_audio_codec: str | None,
+    has_audio: bool,
+) -> list[str]:
+    """Re-encode ``source`` with subtitles rendered by libass.
+
+    ``subtitle_filename`` must be a bare file name in the process working directory
+    (see :func:`check_filter_filename`).
+    """
+    check_filter_filename(subtitle_filename)
+    return encode_args(ffmpeg, source, f"subtitles={subtitle_filename}", output, encoder,
+                       source_audio_codec, has_audio)
+
+
 def frame_preview_args(ffmpeg: Path | str, source: str, subtitle_filename: str, at_seconds: float,
                        output_png: str) -> list[str]:
     """Render one frame with burned-in subtitles (exact libass rendering) to PNG.
 
     The seek is placed after ``-i`` so the subtitle filter sees the real timestamps.
     """
-    if any(ch in subtitle_filename for ch in "/\\:'[],;="):
-        raise ValueError("subtitle_filename must be a plain file name")
+    check_filter_filename(subtitle_filename)
     return [
         str(ffmpeg), "-hide_banner", "-nostdin", "-y",
         "-i", str(source),

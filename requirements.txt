@@ -8,3 +8,7 @@ faster-whisper>=1.1,<2
 av>=12,<19
 # Secure API-key storage (Windows Credential Manager) for optional AI caption correction.
 keyring>=24,<26
+# Face/person detection for auto reframe (Phase 3): YuNet DNN face detector, Haar and HOG.
+# The headless build has no Qt/GUI parts, so it cannot clash with PySide6's Qt libraries.
+# pip builds of OpenCV run on the CPU (no CUDA).
+opencv-python-headless>=4.10,<5

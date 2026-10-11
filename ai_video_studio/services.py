@@ -20,6 +20,14 @@ from ai_video_studio.jobs.caption_jobs import (
 )
 from ai_video_studio.jobs.handlers import PROBE_JOB, make_probe_handler
 from ai_video_studio.jobs.manager import JobManager
+from ai_video_studio.jobs.reframe_jobs import (
+    REFRAME_ANALYZE_JOB,
+    REFRAME_EXPORT_JOB,
+    REFRAME_PREVIEW_JOB,
+    make_reframe_analyze_handler,
+    make_reframe_export_handler,
+    make_reframe_preview_handler,
+)
 from ai_video_studio.jobs.store import JobStore
 from ai_video_studio.storage.database import Database
 from ai_video_studio.storage import secrets
@@ -54,6 +62,9 @@ class Services:
         self.jobs.register(BURN_IN_JOB, make_burn_in_handler(self.ffmpeg_path))
         self.jobs.register(FRAME_PREVIEW_JOB, make_frame_preview_handler(self.ffmpeg_path))
         self.jobs.register(CORRECTION_JOB, make_correction_handler(secrets.get_api_key))
+        self.jobs.register(REFRAME_ANALYZE_JOB, make_reframe_analyze_handler(self.ffmpeg_path))
+        self.jobs.register(REFRAME_EXPORT_JOB, make_reframe_export_handler(self.ffmpeg_path))
+        self.jobs.register(REFRAME_PREVIEW_JOB, make_reframe_preview_handler(self.ffmpeg_path))
         self.settings.subscribe(self._on_setting_changed)
 
     def ffprobe_path(self) -> Path:

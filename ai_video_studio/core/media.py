@@ -12,6 +12,7 @@ from pathlib import Path
 from ai_video_studio.captions.model import CaptionTrack
 from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.core.ffmpeg_tools import VideoMetadata
+from ai_video_studio.reframe.model import ReframeState
 
 VIDEO_EXTENSIONS = frozenset(
     {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv", ".mts", ".m2ts", ".ts", ".mpg", ".mpeg"}
@@ -38,6 +39,7 @@ class MediaItem:
     error: str | None = None
     captions: CaptionTrack | None = None
     caption_style: CaptionStyle | None = None  # None = default style
+    reframe: ReframeState | None = None        # auto reframe settings and cached tracking results
 
     @property
     def effective_caption_style(self) -> CaptionStyle:
@@ -69,6 +71,8 @@ class MediaItem:
             data["captions"] = self.captions.to_dict()
         if self.caption_style is not None:
             data["caption_style"] = self.caption_style.to_dict()
+        if self.reframe is not None:
+            data["reframe"] = self.reframe.to_dict()
         if project_dir is not None:
             try:
                 data["relative_path"] = os.path.relpath(self.path, project_dir)
@@ -94,6 +98,7 @@ class MediaItem:
             error=data.get("error"),
             captions=CaptionTrack.from_dict(data["captions"]) if data.get("captions") else None,
             caption_style=CaptionStyle.from_dict(data["caption_style"]) if data.get("caption_style") else None,
+            reframe=ReframeState.from_dict(data["reframe"]) if data.get("reframe") else None,
         )
 
 

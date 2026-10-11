@@ -22,7 +22,8 @@ PROJECT_FORMAT = "ai-video-studio-project"
 # Version history:
 #   1 - Phase 1: media list with metadata
 #   2 - Phase 2: per-media "captions" (CaptionTrack) and "caption_style" (optional keys)
-PROJECT_VERSION = 2
+#   3 - Phase 3: per-media "reframe" (settings + cached tracking analysis, optional key)
+PROJECT_VERSION = 3
 
 
 @dataclass

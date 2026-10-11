@@ -150,3 +150,74 @@ def run_streaming(
         for t in readers:
             t.join(timeout=2)
     return ProcessResult(proc.returncode, "", "\n".join(tail))
+
+
+def run_frames(
+    args: list[str],
+    frame_bytes: int,
+    on_frame,
+    cancel_event: threading.Event | None = None,
+    stderr_tail_lines: int = 40,
+) -> tuple[ProcessResult, int]:
+    """Run a command that writes fixed-size raw frames to stdout; call ``on_frame(bytes)`` for each.
+
+    Only one frame is held in memory at a time. If ``cancel_event`` is set the process is
+    killed (even while it is not producing output) and :class:`JobCancelled` is raised.
+    Exceptions raised by ``on_frame`` kill the process and propagate.
+    Returns the process result and the number of complete frames read.
+    """
+    import collections
+
+    if frame_bytes <= 0:
+        raise ValueError("frame_bytes must be positive")
+    proc = subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        **_popen_kwargs(),
+    )
+    tail: collections.deque[str] = collections.deque(maxlen=stderr_tail_lines)
+    done = threading.Event()
+
+    def read_stderr():
+        for raw in proc.stderr:
+            tail.append(raw.decode("utf-8", "replace").rstrip("\r\n"))
+
+    def watch_cancel():
+        while not done.wait(0.1):
+            if cancel_event is not None and cancel_event.is_set():
+                kill_process_tree(proc)
+                return
+
+    helpers = [threading.Thread(target=read_stderr, daemon=True), threading.Thread(target=watch_cancel, daemon=True)]
+    for t in helpers:
+        t.start()
+    count = 0
+    buffer = bytearray(frame_bytes)
+    view = memoryview(buffer)
+    try:
+        while True:
+            filled = 0
+            while filled < frame_bytes:
+                n = proc.stdout.readinto(view[filled:])
+                if not n:
+                    break
+                filled += n
+            if cancel_event is not None and cancel_event.is_set():
+                raise JobCancelled("Cancelled by user")
+            if filled < frame_bytes:
+                break  # end of stream (a partial last frame is ignored)
+            on_frame(bytes(buffer))
+            count += 1
+        proc.wait()
+    except BaseException:
+        kill_process_tree(proc)
+        raise
+    finally:
+        done.set()
+        for t in helpers:
+            t.join(timeout=2)
+        proc.stdout.close()
+    return ProcessResult(proc.returncode, "", "\n".join(tail)), count

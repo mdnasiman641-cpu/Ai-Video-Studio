@@ -8,7 +8,6 @@ affected by edits made after it was queued.
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -18,16 +17,16 @@ from ai_video_studio.captions.correction import request_corrections
 from ai_video_studio.captions.transcriber import TranscriptionOptions, transcribe_file
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import MediaError, StudioError
-from ai_video_studio.core.fs import remove_file, remove_tree
+from ai_video_studio.core.fs import remove_tree
 from ai_video_studio.core.ffmpeg_commands import (
     EncoderSettings,
     ProgressParser,
     audio_extract_args,
     burn_in_args,
-    choose_video_encoder,
     frame_preview_args,
 )
 from ai_video_studio.core.process import run_process, run_streaming
+from ai_video_studio.jobs.encode import encode_with_fallback, ffmpeg_error
 from ai_video_studio.jobs.manager import JobContext
 from ai_video_studio.jobs.models import Job
 
@@ -47,11 +46,6 @@ def job_temp_dir(job: Job) -> Path:
     return folder
 
 
-def _ffmpeg_error(result_stderr: str, fallback: str) -> str:
-    lines = [ln.strip() for ln in result_stderr.splitlines() if ln.strip()]
-    return lines[-1] if lines else fallback
-
-
 def extract_audio(ffmpeg: Path, source: str, output_wav: str, duration: float | None,
                   ctx: JobContext, weight: float) -> None:
     parser = ProgressParser(duration)
@@ -66,7 +60,7 @@ def extract_audio(ffmpeg: Path, source: str, output_wav: str, duration: float | 
         detail = result.stderr.lower()
         if "matches no streams" in detail or "does not contain any stream" in detail:
             raise MediaError("This video has no audio track, so there is nothing to transcribe.")
-        raise MediaError(f"Audio extraction failed: {_ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
+        raise MediaError(f"Audio extraction failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
 
 
 def make_transcribe_handler(get_ffmpeg: Callable[[], Path], model_factory=None, cuda_devices: int | None = None):
@@ -122,44 +116,22 @@ def make_burn_in_handler(get_ffmpeg: Callable[[], Path]):
             raise StudioError("The output file must be different from the source video.")
         output.parent.mkdir(parents=True, exist_ok=True)
         ffmpeg = get_ffmpeg()
-        codec, reason = choose_video_encoder(p.get("encoder", "auto"), ffmpeg)
-        warnings = [] if codec == "h264_nvenc" or p.get("encoder") == "libx264" else [reason]
         folder = job_temp_dir(job)
         (folder / SUBTITLE_FILE).write_text(p["ass"], encoding="utf-8")
-        partial = output.with_name(output.stem + ".part" + output.suffix)
+
+        def build(encoder: EncoderSettings, partial: str) -> list[str]:
+            # Runs inside the job folder so the subtitles filter gets a plain relative file name.
+            return burn_in_args(ffmpeg, p["path"], SUBTITLE_FILE, partial, encoder,
+                                p.get("audio_codec"), bool(p.get("has_audio", True)))
+
         try:
-            result = _encode(ffmpeg, p, codec, folder, partial, ctx)
-            if result.returncode != 0 and codec == "h264_nvenc":
-                warnings.append("NVENC encoding failed; retried with the CPU encoder (libx264): "
-                                + _ffmpeg_error(result.stderr, "unknown error"))
-                log.warning("NVENC encode failed, retrying with libx264", extra={"job_id": job.id})
-                codec = "libx264"
-                result = _encode(ffmpeg, p, codec, folder, partial, ctx)
-            if result.returncode != 0:
-                raise StudioError(f"Export failed: {_ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
-            os.replace(partial, output)
+            codec, warnings = encode_with_fallback(ffmpeg, build, p.get("encoder", "auto"),
+                                                   int(p.get("quality", 20)), p.get("duration"), output, folder, ctx)
         finally:
             remove_tree(folder)
-            if partial.exists() and not remove_file(partial):
-                log.warning("Could not remove partial export", extra={"path": str(partial)})
         return {"media_id": p.get("media_id"), "output": str(output), "encoder": codec, "warnings": warnings}
 
     return handle
-
-
-def _encode(ffmpeg: Path, p: dict, codec: str, folder: Path, partial: Path, ctx: JobContext):
-    encoder = EncoderSettings(codec=codec, quality=int(p.get("quality", 20)))
-    args = burn_in_args(ffmpeg, p["path"], SUBTITLE_FILE, str(partial), encoder,
-                        p.get("audio_codec"), bool(p.get("has_audio", True)))
-    parser = ProgressParser(p.get("duration"))
-
-    def on_line(line: str) -> None:
-        fraction = parser.feed(line)
-        if fraction is not None:
-            ctx.report_progress(min(fraction, 0.999))
-
-    # Run inside the job folder so the subtitles filter gets a plain relative file name.
-    return run_streaming(args, on_line, cancel_event=ctx.cancel_event, cwd=str(folder))
 
 
 def make_frame_preview_handler(get_ffmpeg: Callable[[], Path]):
@@ -175,7 +147,7 @@ def make_frame_preview_handler(get_ffmpeg: Callable[[], Path]):
             except subprocess.TimeoutExpired as exc:
                 raise StudioError("Preview render timed out.") from exc
             if result.returncode != 0 or not output.is_file():
-                raise StudioError(f"Preview render failed: {_ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
+                raise StudioError(f"Preview render failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
         finally:
             remove_tree(folder)
         return {"media_id": p.get("media_id"), "image": str(output), "at": p["at"]}
