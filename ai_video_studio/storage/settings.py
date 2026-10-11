@@ -25,9 +25,12 @@ def _int_range(low: int, high: int) -> Callable[[Any], str | None]:
 
 
 def _optional_dir(value: str) -> str | None:
-    if value and not Path(value).is_dir():
-        return "folder does not exist"
-    return None
+    if not value:
+        return None
+    try:
+        return None if Path(value).is_dir() else "folder does not exist"
+    except OSError as exc:  # e.g. WinError 448 for an untrusted link, or access denied
+        return f"folder cannot be accessed ({exc.strerror or exc})"
 
 
 def _choice(*options: str) -> Callable[[Any], str | None]:

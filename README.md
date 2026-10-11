@@ -489,7 +489,7 @@ for both the installer and the ZIP.
 
 1. Download the setup EXE (from a GitHub release, or the `ai-video-studio-windows` artifact of the
    *Windows build* workflow run) and check it against `SHA256SUMS.txt` if you like:
-   `certutil -hashfile AI-Video-Studio-0.7.0-setup-win64.exe SHA256`.
+   `certutil -hashfile AI-Video-Studio-0.7.1-setup-win64.exe SHA256`.
 2. Run it. The installer is not code-signed, so Windows SmartScreen may say "Windows protected your
    PC": click **More info → Run anyway**.
 3. By default it installs **for the current user only** in `%LOCALAPPDATA%\Programs\AI Video Studio`
@@ -552,6 +552,10 @@ The standard build is a **CPU build**: it runs on any 64-bit Windows 10/11 PC an
 NVIDIA libraries or drivers.
 - **Speech recognition**: CPU (int8). The app checks for CUDA and falls back to the CPU when it is
   not available.
+- **CUDA libraries**: with an NVIDIA GPU but without the CUDA 12 cuBLAS / cuDNN 9 libraries (the
+  standard build), 'Automatic' transcribes on the CPU without trying CUDA first (since v0.7.1).
+  A missing cuDNN can otherwise end the process inside CTranslate2. `--check-env` shows which
+  libraries were found and which device 'Automatic' will use.
 - **Video encoding**: NVENC is used for exports when a 1-frame test encode succeeds (needs an NVIDIA GPU
   and a current driver; the bundled FFmpeg supports NVENC). Otherwise libx264 on the CPU is used.
   CUDA and NVENC are detected separately; `--check-env` and the self-test show both.
@@ -587,7 +591,7 @@ Then test the result as CI does:
 ```bat
 powershell -ExecutionPolicy Bypass -File packaging\windows\test_packaged.ps1 -AppDir dist\AI-Video-Studio
 ```
-Add `-Zip dist\AI-Video-Studio-0.7.0-portable-win64.zip -Installer dist\AI-Video-Studio-0.7.0-setup-win64.exe`
+Add `-Zip dist\AI-Video-Studio-0.7.1-portable-win64.zip -Installer dist\AI-Video-Studio-0.7.1-setup-win64.exe`
 to also test the ZIP, install, upgrade and uninstall (the installer test installs for the current user
 and uninstalls again), and `-WhisperModel tiny` to download a model and transcribe.
 
@@ -605,7 +609,7 @@ is used.
 | GUI start-up with the native Windows platform (`--smoke-test`) | Passed |
 | Whisper model download through the app's downloader (tiny, from Hugging Face, checksums) | Passed |
 | Self-test inside the EXE: bundled FFmpeg/FFprobe found, video import (probe job), Qt Multimedia playback, SRT export and subtitle burn-in, CUDA/NVENC detection, bundled YuNet face detection, auto reframe analysis + export, Silero VAD, Whisper transcription (CPU fallback), project save/reopen, temp-file cleanup | 16 of 16 passed |
-| v0.7.0 additions to the self-test: Smart Cut silence detection + cut export, Resize & Crop blur export + exact frame, Bulk presets/safe names/render limit, AI routing with a stand-in provider | Required by the packaged-app test from v0.7.0 (result: see the final report and the workflow run) |
+| v0.7.0 additions to the self-test: Smart Cut silence detection + cut export, Resize & Crop blur export + exact frame, Bulk presets/safe names/render limit, AI routing with a stand-in provider | Passed in the packaged EXE (v0.7.0, commit 31c7d6b, workflow run 38166595965) |
 | Settings persist across a restart (second self-test run) | Passed |
 | Program folder without `bin\ffmpeg.exe`: clear message, app still starts | Passed |
 | Portable ZIP with `portable.txt`: data goes to `UserData\` | Passed |
@@ -619,6 +623,13 @@ uninstall question; SmartScreen; how the app looks on a real screen and with dis
 your own videos; **GPU transcription and NVENC exports on the RTX 4070** (the runners have no GPU, so
 CI only checks that their absence is detected and the CPU is used); speed on your Ryzen 7 7700; a
 model download through your own network; antivirus software reactions.
+
+### Testing on your own PC
+
+[documentation/WINDOWS_ACCEPTANCE_TEST.md](documentation/WINDOWS_ACCEPTANCE_TEST.md) has:
+- the step-by-step acceptance checklist (start-up, captions, Smart Cut with an A/V sync test clip,
+  Auto Reframe, Resize & Crop, Bulk Processing, NVENC, AI providers and key storage);
+- safe diagnostic commands and what to send back.
 
 ## Requirements (running from source)
 

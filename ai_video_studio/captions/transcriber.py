@@ -75,8 +75,14 @@ class TranscriptionOptions:
             raise TranscriptionError(f"Unsupported device '{self.device}'")
         if not self.model_path and self.model not in MODELS:
             raise TranscriptionError(f"Unknown model '{self.model}'")
-        if self.model_path and not Path(self.model_path).is_dir():
-            raise TranscriptionError(f"Model folder not found: {self.model_path}")
+        if self.model_path:
+            try:
+                exists = Path(self.model_path).is_dir()
+            except OSError as exc:  # e.g. WinError 448 (untrusted link) or access denied
+                raise TranscriptionError(f"The model folder {self.model_path} cannot be read: "
+                                         f"{exc.strerror or exc}. Choose another folder in Settings → Captions.") from exc
+            if not exists:
+                raise TranscriptionError(f"Model folder not found: {self.model_path}")
 
 
 @dataclass
@@ -114,7 +120,15 @@ def register_nvidia_dll_dirs() -> list[str]:
                 os.add_dll_directory(str(folder))
                 os.environ["PATH"] = str(folder) + os.pathsep + os.environ.get("PATH", "")
                 added.append(str(folder))
+    _registered_dirs.extend(added)
     return added
+
+
+_registered_dirs: list[str] = []
+
+
+def register_nvidia_dll_dirs_list() -> list[str]:
+    return list(_registered_dirs)
 
 
 _dll_dirs_registered = False
@@ -140,6 +154,57 @@ def _default_model_factory(model: str, device: str, compute_type: str, download_
     return WhisperModel(model, device=device, compute_type=compute_type, download_root=download_root)
 
 
+# CTranslate2 4.x on Windows needs these from CUDA 12 / cuDNN 9. A GPU and driver alone are not
+# enough, and a missing cuDNN can end the process inside the native library instead of raising an
+# error, so "auto" only tries CUDA when the files are present.
+CUDA_DLLS = ("cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll")
+
+
+def _cuda_search_dirs() -> list[Path]:
+    import os
+    import sys
+
+    dirs = [Path(d) for d in register_nvidia_dll_dirs_list()]
+    try:
+        import ctranslate2
+
+        dirs.append(Path(ctranslate2.__file__).parent)
+    except Exception:  # noqa: BLE001
+        pass
+    if getattr(sys, "_MEIPASS", None):
+        dirs.append(Path(sys._MEIPASS))
+    if os.environ.get("CUDA_PATH"):
+        dirs.append(Path(os.environ["CUDA_PATH"]) / "bin")
+    dirs += [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p.strip()]
+    return dirs
+
+
+def cuda_libraries() -> dict[str, str | None]:
+    """Where each required CUDA DLL was found (None = missing). Only files are checked; nothing
+    is loaded. Empty dict on platforms other than Windows (not checked there)."""
+    import sys
+
+    if sys.platform != "win32":
+        return {}
+    _ensure_dll_dirs()
+    found: dict[str, str | None] = {name: None for name in CUDA_DLLS}
+    for folder in _cuda_search_dirs():
+        for name in CUDA_DLLS:
+            if found[name] is None:
+                try:
+                    candidate = folder / name
+                    if candidate.is_file():
+                        found[name] = str(candidate)
+                except OSError:
+                    continue
+    return found
+
+
+def cuda_libraries_ok() -> bool:
+    libs = cuda_libraries()
+    return all(libs.values()) if libs else True
+
+
 def cuda_device_count() -> int:
     _ensure_dll_dirs()
     try:
@@ -150,12 +215,16 @@ def cuda_device_count() -> int:
         return 0
 
 
-def device_attempts(preference: str, cuda_devices: int) -> list[tuple[str, str]]:
-    """Ordered (device, compute_type) attempts for a device preference."""
+def device_attempts(preference: str, cuda_devices: int, libraries_ok: bool = True) -> list[tuple[str, str]]:
+    """Ordered (device, compute_type) attempts for a device preference.
+
+    "auto" uses CUDA only when a device is visible **and** the CUDA libraries are present;
+    "cuda" always tries CUDA first (the user asked for it). The CPU is always the last attempt.
+    """
     cpu = ("cpu", "int8")
     if preference == "cpu":
         return [cpu]
-    if preference == "cuda" or cuda_devices > 0:
+    if preference == "cuda" or (cuda_devices > 0 and libraries_ok):
         return [("cuda", "float16"), cpu]
     return [cpu]
 
@@ -200,9 +269,15 @@ def transcribe_file(
     options.validate()
     factory = model_factory or _default_model_factory
     devices = cuda_device_count() if cuda_devices is None else cuda_devices
-    attempts = device_attempts(options.device, devices)
+    libraries_ok = cuda_libraries_ok() if devices > 0 and options.device == "auto" else True
+    attempts = device_attempts(options.device, devices, libraries_ok)
     model_name = options.model_path or options.model
     warnings: list[str] = []
+    if not libraries_ok:
+        missing = ", ".join(name for name, path in cuda_libraries().items() if not path)
+        warnings.append(f"An NVIDIA GPU was found, but the CUDA libraries are missing ({missing}); "
+                        "transcribing on the CPU. The standard build is CPU-only; see README → GPU and CPU.")
+        log.info("CUDA libraries missing; using the CPU", extra={"missing": missing})
     if options.device == "cuda" and devices == 0:
         warnings.append("No CUDA device was detected; trying CUDA anyway as requested.")
 

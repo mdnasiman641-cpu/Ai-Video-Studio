@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ai_video_studio.captions.correction import apply_suggestions
-from ai_video_studio.captions.models import WHISPER_MODELS
+from ai_video_studio.captions.models import WHISPER_MODELS, model_status
 from ai_video_studio.captions.model import (
     CaptionError,
     CaptionTrack,
@@ -625,12 +625,18 @@ class CaptionsPage(QWidget):
         missing = self.controller.model_to_download(values["model"])
         if missing is not None:
             spec = WHISPER_MODELS[missing]
-            answer = QMessageBox.question(
-                self, "Download Speech Model",
-                f"The Whisper model '{missing}' is not on this computer yet.\n\n"
-                f"Download it now from Hugging Face (about {spec.approx_mb} MB)? It is stored in your user data "
-                f"folder, checked, and reused for all later transcriptions, also offline.\n\n"
-                f"Progress is shown in Export Queue.")
+            status = model_status(missing)
+            if status["importable"]:
+                text = (f"The Whisper model '{missing}' is in the old model cache, but cannot be used from there "
+                        f"({status['problem'] or 'unreadable'}).\n\nCopy it into your model folder now? Each file is "
+                        f"checked; nothing is downloaded unless the copy fails (then about {spec.approx_mb} MB). "
+                        f"The old cache is not changed.")
+            else:
+                text = (f"The Whisper model '{missing}' is not on this computer yet"
+                        + (f" ({status['problem']})" if status["problem"] else "") + ".\n\n"
+                        f"Download it now from Hugging Face (about {spec.approx_mb} MB)? It is stored in your user "
+                        f"data folder, checked, and reused for all later transcriptions, also offline.")
+            answer = QMessageBox.question(self, "Speech Model", text + "\n\nProgress is shown in Export Queue.")
             if answer != QMessageBox.StandardButton.Yes:
                 return
         try:

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ai_video_studio.captions.correction import word_diff
-from ai_video_studio.captions.transcriber import LANGUAGES, MODELS, cuda_device_count
+from ai_video_studio.captions.transcriber import LANGUAGES, MODELS, cuda_device_count, cuda_libraries_ok
 from ai_video_studio.core.media import MediaItem, MediaStatus
 
 
@@ -121,8 +121,15 @@ class GenerateCaptionsDialog(QDialog):
             self.model.setToolTip(f"Using the local model folder from Settings: {custom}")
 
         gpus = cuda_device_count()
+        if gpus and not cuda_libraries_ok():
+            device_text = ("NVIDIA GPU detected, but the CUDA 12 cuBLAS / cuDNN 9 libraries are not installed "
+                           "(standard CPU build): Automatic uses the CPU. ")
+        elif gpus:
+            device_text = f"CUDA devices detected: {gpus}. "
+        else:
+            device_text = "No CUDA device detected; the CPU will be used. "
         info = QLabel(
-            (f"CUDA devices detected: {gpus}. " if gpus else "No CUDA device detected; the CPU will be used. ")
+            device_text
             + "A model that is not on this computer yet is downloaded only after you confirm "
               "(tiny ≈75 MB … large-v3 ≈3 GB)."
         )

@@ -301,15 +301,74 @@ class SelfTest:
         return {"profiles": len(profiles), "secure_key_store": secrets.secure_store_available(),
                 "fallback": "ok"}
 
+    def unreadable_model_cache(self):
+        """The main window opens while a Whisper cache snapshot raises WinError 448 (simulated).
+
+        v0.7.0 crashed at start-up in this situation. Runs in a temporary data folder, so the user's
+        real models and settings are not touched.
+        """
+        import os
+        import pathlib
+
+        from ai_video_studio.captions import models
+        from ai_video_studio.services import Services
+        from ai_video_studio.ui.main_window import MainWindow
+
+        class UntrustedMountPoint(OSError):
+            winerror = 448
+
+        temp = self.work / "model-cache-test"
+        previous = os.environ.get("AVS_DATA_DIR")
+        os.environ["AVS_DATA_DIR"] = str(temp)
+        original = pathlib.Path.is_file
+
+        def is_file(path, *a, **k):
+            if "snapshots" in str(path):
+                raise UntrustedMountPoint(22, "untrusted mount point", str(path))
+            return original(path, *a, **k)
+
+        try:
+            snapshot = models.legacy_cache("small") / "snapshots" / "rev"
+            snapshot.mkdir(parents=True)
+            (snapshot / "config.json").write_text("{}")
+            pathlib.Path.is_file = is_file
+            services = Services(temp / "studio.db")
+            try:
+                window = MainWindow(services)
+                status = window.settings_page.models.table.item(list(models.WHISPER_MODELS).index("small"), 2).text()
+                window.close()
+                window.deleteLater()
+            finally:
+                services.close()
+        finally:
+            pathlib.Path.is_file = original
+            if previous is None:
+                os.environ.pop("AVS_DATA_DIR", None)
+            else:
+                os.environ["AVS_DATA_DIR"] = previous
+        if not status.startswith("Cannot be read"):
+            raise AssertionError(f"unexpected model status {status!r}")
+        return {"settings_status": status}
+
     def gpu(self):
-        from ai_video_studio.captions.transcriber import cuda_device_count
-        from ai_video_studio.core.ffmpeg_commands import available_encoders, nvenc_usable
+        from ai_video_studio.captions.transcriber import cuda_device_count, cuda_libraries, device_attempts
+        from ai_video_studio.core.ffmpeg_commands import available_encoders, choose_video_encoder, nvenc_usable
         from ai_video_studio.reframe.detection import opencv_cuda_devices
 
         ffmpeg = self.ffmpeg()
-        return {"ctranslate2_cuda_devices": cuda_device_count(),
-                "nvenc_listed": "h264_nvenc" in available_encoders(ffmpeg),
-                "nvenc_usable": nvenc_usable(ffmpeg), "opencv_cuda_devices": opencv_cuda_devices()}
+        encoders = available_encoders(ffmpeg)
+        devices = cuda_device_count()
+        libraries = cuda_libraries()
+        missing = [name for name, path in libraries.items() if not path]
+        whisper_first = device_attempts("auto", devices, not missing)[0][0]
+        return {"ctranslate2_cuda_devices": devices, "cuda_libraries_missing": missing,
+                "whisper_auto_device": whisper_first,
+                "nvenc_listed": "h264_nvenc" in encoders, "nvenc_usable": nvenc_usable(ffmpeg),
+                "hevc_nvenc_listed": "hevc_nvenc" in encoders,
+                "hevc_nvenc_usable": nvenc_usable(ffmpeg, "hevc_nvenc"),
+                "libx265": "libx265" in encoders,
+                "auto_export_encoder_h264": choose_video_encoder("auto", ffmpeg, "h264")[0],
+                "opencv_cuda_devices": opencv_cuda_devices()}
 
     def face_detection(self):
         import numpy as np
@@ -471,6 +530,8 @@ class SelfTest:
                 self.check("project save and reopen", self.project)
                 self.check("temporary files cleaned up", self.temp_cleanup)
             self.check("AI provider manager (stand-in provider, no network)", self.ai_manager)
+            self.check("start-up with an unreadable model cache (WinError 448, simulated)",
+                       self.unreadable_model_cache)
             self.check("downloaded Whisper models", self.models)
             self.check("settings persistence", self.settings_persistence)
         finally:

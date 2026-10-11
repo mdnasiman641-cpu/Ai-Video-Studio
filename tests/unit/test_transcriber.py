@@ -147,3 +147,37 @@ def test_extracted_wav_is_passed_as_samples_not_path(tmp_path):
     tr.clear_model_cache()
     tr.transcribe_file(str(other), tr.TranscriptionOptions(), model_factory=FakeFactory(model2), cuda_devices=0)
     assert model2.calls[0][0] == str(other)  # unknown formats still go to faster-whisper's own decoder
+
+
+def test_auto_uses_cpu_when_cuda_libraries_are_missing(monkeypatch, tmp_path):
+    """A visible GPU without cuBLAS/cuDNN (the standard CPU build) must not try CUDA automatically:
+    a missing cuDNN can end the process inside the native library instead of raising."""
+    assert tr.device_attempts("auto", 1, libraries_ok=False) == [("cpu", "int8")]
+    assert tr.device_attempts("cuda", 1, libraries_ok=False)[0][0] == "cuda"  # explicit choice is honoured
+    monkeypatch.setattr(tr, "cuda_libraries_ok", lambda: False)
+    monkeypatch.setattr(tr, "cuda_libraries", lambda: {"cublas64_12.dll": "x", "cudnn64_9.dll": None})
+    factory = FakeFactory(FakeWhisperModel(fake_segments([[(0.0, 0.5, " Hi")]])))
+    wav = tmp_path / "a.wav"
+    import wave
+
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\0\0" * 16000)
+    result = tr.transcribe_file(str(wav), tr.TranscriptionOptions(model="tiny", device="auto"),
+                                model_factory=factory, cuda_devices=1)
+    assert factory.loads == [("tiny", "cpu", "int8")] and result.device == "cpu"
+    assert any("cudnn64_9.dll" in w for w in result.warnings)
+
+
+def test_cuda_library_search_finds_files_without_loading(monkeypatch, tmp_path):
+    monkeypatch.setattr("sys.platform", "win32")
+    for name in tr.CUDA_DLLS:
+        (tmp_path / name).write_bytes(b"")
+    monkeypatch.setattr(tr, "_ensure_dll_dirs", lambda: None)
+    monkeypatch.setattr(tr, "_cuda_search_dirs", lambda: [tmp_path / "missing", tmp_path])
+    found = tr.cuda_libraries()
+    assert set(found) == set(tr.CUDA_DLLS) and all(found.values())
+    (tmp_path / "cudnn64_9.dll").unlink()
+    assert tr.cuda_libraries()["cudnn64_9.dll"] is None and not tr.cuda_libraries_ok()

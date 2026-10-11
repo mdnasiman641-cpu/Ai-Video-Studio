@@ -1,5 +1,38 @@
 # Troubleshooting
 
+## v0.7.0 does not start: "OSError: [WinError 448] ... untrusted mount point"
+**Fixed in v0.7.1.** Install v0.7.1 or newer over v0.7.0; your settings, projects and models are kept.
+
+**Cause.**
+- Versions 0.2–0.3 let faster-whisper download Whisper models into
+  `%LOCALAPPDATA%\AIVideoStudio\models\models--<org>--<model>\` (the Hugging Face cache layout).
+- When Windows allows it (Developer Mode or administrator rights), the files in `snapshots\<revision>\`
+  are **symbolic links** to files in `blobs\`.
+- v0.7.0 checks every model while building the Settings page, at start-up. Windows refused to follow
+  such a link (WinError 448, `ERROR_UNTRUSTED_MOUNT_POINT`), and the error was not handled, so the
+  program closed before its window appeared.
+
+**What v0.7.1 does.**
+- Model folders are inspected without letting filesystem errors escape. Each model shows a state in
+  Settings → Speech recognition models: Downloaded, Not downloaded, Incomplete download, or Cannot be
+  read (with the reason in the tooltip and below the table). The rest of the app works normally;
+  transcription asks for a usable model.
+- A model in the old cache that cannot be read through its links shows "can be imported from the old
+  cache". **Import Selected** reads each link as text (without following it), accepts only targets
+  inside the cache's own `blobs` folder, and copies the files into `models\whisper\<model>` as plain
+  files. Each file is checked against its checksum (the blob file name). Nothing is downloaded, and
+  the old cache is not changed or deleted. If the copy fails, the model is downloaded instead, after
+  you confirm.
+
+**Checking it yourself** (read-only):
+```bat
+dir /AL "%LOCALAPPDATA%\AIVideoStudio\models\models--Systran--faster-whisper-small\snapshots\*"
+fsutil reparsepoint query "%LOCALAPPDATA%\AIVideoStudio\models\models--Systran--faster-whisper-small\snapshots\<revision>\model.bin"
+```
+`<SYMLINK>` entries in the `dir` output, or a "Symbolic Link" tag from `fsutil`, confirm the link layout.
+Once a model is imported or downloaded into `models\whisper\`, you can delete the old
+`models--...` folder yourself if you want the disk space back. The app never deletes it on its own.
+
 ## The app does not start
 1. Start **AI Video Studio Tools → AI Video Studio (diagnostic console)** from the Start Menu, or run
    `AI-Video-Studio-Console.exe` from the program folder. It shows the log in a console window and
@@ -110,6 +143,9 @@ or download a faster-whisper (CTranslate2) model folder, for example `Systran/fa
 and choose it under **Settings → Captions → Local model folder**.
 
 ## Captions are generated on the CPU although I have an NVIDIA GPU
+This is expected with the standard (CPU) build: it does not include the CUDA 12 cuBLAS / cuDNN 9
+libraries, so "Automatic" uses the CPU. `AI-Video-Studio-Console.exe --check-env` lists the missing
+DLLs. NVENC video encoding does not need them.
 The status line after generation shows the device and the reason for any fallback. GPU
 transcription needs the CUDA 12 cuBLAS and cuDNN 9 libraries. The standard installer is a CPU
 build and does not include them. From source, run `scripts\windows\setup.bat --gpu` (installs them

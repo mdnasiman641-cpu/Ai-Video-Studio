@@ -4,7 +4,7 @@ and runnable on your own PC (that is how GPU/NVENC detection on your hardware ge
 
   powershell -ExecutionPolicy Bypass -File packaging\windows\test_packaged.ps1 `
       -AppDir dist\AI-Video-Studio -Assets build\test-assets -WhisperModel tiny `
-      -Zip dist\AI-Video-Studio-0.7.0-portable-win64.zip -Installer dist\AI-Video-Studio-0.7.0-setup-win64.exe
+      -Zip dist\AI-Video-Studio-0.7.1-portable-win64.zip -Installer dist\AI-Video-Studio-0.7.1-setup-win64.exe
 
 Every step runs with a PATH that contains only Windows itself, so Python, pip and any FFmpeg
 installed on the machine are invisible to the program.
@@ -99,6 +99,31 @@ Step "GUI start-up without console (windowed EXE, --smoke-test)" {
     if ($subsystem -ne 2) { throw "AI-Video-Studio.exe is not a GUI-subsystem executable (subsystem $subsystem)" }
 }
 
+Step "Start-up with an old Hugging Face model cache containing links (Settings model status)" {
+    # Regression for v0.7.0, which crashed at start-up while inspecting such a cache (WinError 448).
+    # Real Windows reparse points: a working symbolic link, a broken one and a broken junction.
+    $linkData = Join-Path $Work "data-links"
+    $cache = Join-Path $linkData "models\models--Systran--faster-whisper-small"
+    $snapshot = Join-Path $cache "snapshots\536b0662742c02347bc0e980a01041f333bce120"
+    New-Item -ItemType Directory -Force -Path (Join-Path $cache "blobs"), $snapshot | Out-Null
+    $blob = Join-Path $cache "blobs\0123456789abcdef0123456789abcdef01234567"
+    Set-Content -Path $blob -Value "{}"
+    try {
+        New-Item -ItemType SymbolicLink -Path (Join-Path $snapshot "config.json") -Target $blob | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $snapshot "model.bin") -Target (Join-Path $cache "blobs\missing") | Out-Null
+        $gone = Join-Path $Work "junction-target"
+        New-Item -ItemType Directory -Force -Path $gone | Out-Null
+        New-Item -ItemType Junction -Path (Join-Path $linkData "models\models--Systran--faster-whisper-tiny") -Target $gone | Out-Null
+        Remove-Item $gone
+    } catch {
+        Write-Host "  links not created (needs Developer Mode or administrator rights): $($_.Exception.Message)"
+    }
+    $code = Run-Exe $Gui @("--smoke-test") $linkData 180
+    if ($code -ne 0) { throw "exit code $code" }
+    $log = Join-Path $linkData "logs\ai_video_studio.log"
+    if (-not (Select-String -Path $log -Pattern "Smoke test passed" -Quiet)) { throw "no 'Smoke test passed' in $log" }
+}
+
 if ($WhisperModel) {
     Step "Whisper model download through the packaged downloader ($WhisperModel)" {
         $code = Run-Exe $Console @("--download-model", $WhisperModel) $Data 1800
@@ -119,7 +144,8 @@ Step "Functional self-test in the packaged EXE (run 1)" {
               "captions: SRT and burn-in export", "GPU / CUDA / NVENC detection", "face detection (bundled YuNet)",
               "auto reframe analysis and export", "project save and reopen", "temporary files cleaned up",
               "smart cut: silence detection and cut export", "resize & crop: blur background export and exact frame",
-              "bulk processing: presets, safe names, render limit", "AI provider manager (stand-in provider, no network)")
+              "bulk processing: presets, safe names, render limit", "AI provider manager (stand-in provider, no network)",
+              "start-up with an unreadable model cache (WinError 448, simulated)")
     if ($Assets) { $must += "speech activity (Silero VAD)" }
     if ($WhisperModel) { $must += "Whisper transcription (device auto, CPU fallback)" }
     $r = Check-Report $report $must

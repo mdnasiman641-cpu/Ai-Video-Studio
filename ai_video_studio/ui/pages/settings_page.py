@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ai_video_studio.captions.models import WHISPER_MODELS, model_status, remove_model
+from ai_video_studio.captions.models import WHISPER_MODELS, custom_folder_status, model_status, remove_model
 from ai_video_studio.captions.transcriber import LANGUAGES, MODELS
 from ai_video_studio.jobs.caption_jobs import MODEL_DOWNLOAD_JOB
 from ai_video_studio.jobs.models import Job, JobState
@@ -57,6 +57,11 @@ class ModelsCard(Card):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.setMinimumHeight(210)
+        self._status: dict[str, dict] = {}
+        self.problems = QLabel("")
+        self.problems.setObjectName("Warning")
+        self.problems.setWordWrap(True)
+        self.problems.setVisible(False)
         self.download_button = QPushButton("Download Selected")
         self.delete_button = QPushButton("Delete Selected")
         open_button = QPushButton("Open Models Folder")
@@ -65,6 +70,7 @@ class ModelsCard(Card):
             row.addWidget(b)
         row.addStretch(1)
         self.body.addWidget(self.table)
+        self.body.addWidget(self.problems)
         self.body.addLayout(row)
         self.download_button.clicked.connect(self.download_selected)
         self.delete_button.clicked.connect(self.delete_selected)
@@ -81,18 +87,36 @@ class ModelsCard(Card):
 
     def refresh(self) -> None:
         active = self._active()
+        problems = []
         for row, name in enumerate(WHISPER_MODELS):
-            status = model_status(name)
+            try:
+                status = model_status(name)
+            except OSError as exc:  # inspection handles these itself; this only keeps the window usable
+                status = {"name": name, "approx_mb": WHISPER_MODELS[name].approx_mb, "downloaded": False,
+                          "state": "inaccessible", "label": "Cannot be read", "problem": str(exc),
+                          "importable": False, "path": None, "size_mb": None}
+            self._status[name] = status
             job = active.get(name)
             if job is not None:
                 text = f"Downloading… {int(job.progress * 100)}%" if job.state is JobState.RUNNING else "Queued"
             elif status["downloaded"]:
                 text = f"Downloaded ({status['path']})"
             else:
-                text = "Not downloaded"
+                text = status["label"] + (" — can be imported from the old cache" if status["importable"] else "")
             size = f"{status['size_mb']} MB" if status["downloaded"] else f"≈ {status['approx_mb']} MB"
             for col, value in enumerate((name, size, text)):
-                self.table.setItem(row, col, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                if status["problem"]:
+                    item.setToolTip(status["problem"])
+                self.table.setItem(row, col, item)
+            if status["problem"] and job is None:
+                problems.append(f"⚠ {name}: {status['problem']}")
+        custom = self.services.settings.get("whisper_model_dir")
+        if custom:
+            state, message = custom_folder_status(custom)
+            problems.insert(0, ("✔ " if state == "installed" else "⚠ ") + message)
+        self.problems.setText("\n".join(problems))
+        self.problems.setVisible(bool(problems))
         if active and not self._timer.isActive():
             self._timer.start()
         elif not active and self._timer.isActive():
@@ -105,9 +129,11 @@ class ModelsCard(Card):
 
     def _update_buttons(self) -> None:
         name = self.selected()
-        downloaded = name is not None and model_status(name)["downloaded"]
+        status = self._status.get(name, {}) if name else {}
+        downloaded = bool(status.get("downloaded"))
         busy = name in self._active() if name else False
         self.download_button.setEnabled(name is not None and not downloaded and not busy)
+        self.download_button.setText("Import Selected" if status.get("importable") else "Download Selected")
         self.delete_button.setEnabled(downloaded and not busy)
 
     def download_selected(self) -> Job | None:
@@ -115,9 +141,14 @@ class ModelsCard(Card):
         if name is None:
             return None
         spec = WHISPER_MODELS[name]
-        answer = QMessageBox.question(self, "Download Speech Model",
-                                      f"Download the Whisper model '{name}' (about {spec.approx_mb} MB) from "
-                                      f"Hugging Face now?")
+        if self._status.get(name, {}).get("importable"):
+            text = (f"Copy the Whisper model '{name}' from the old model cache into "
+                    f"{paths.models_dir() / 'whisper' / name}? Each file is checked against its checksum; nothing "
+                    f"is downloaded and the old cache is not changed. If the copy fails, the model is downloaded "
+                    f"from Hugging Face instead (about {spec.approx_mb} MB).")
+        else:
+            text = f"Download the Whisper model '{name}' (about {spec.approx_mb} MB) from Hugging Face now?"
+        answer = QMessageBox.question(self, "Speech Model", text)
         if answer != QMessageBox.StandardButton.Yes:
             return None
         active = self._active().get(name)

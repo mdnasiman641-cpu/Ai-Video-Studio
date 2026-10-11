@@ -2,7 +2,49 @@
 
 All notable changes are listed here. Versions follow semantic versioning.
 
-## [0.7.0] - Unreleased
+## [0.7.1] - Unreleased
+
+Fixes the v0.7.0 start-up crash (WinError 448) and prepares acceptance testing on a real Windows PC. No new features; Phase 8 not started.
+
+### Fixed
+- **Start-up crash (v0.7.0):** `OSError: [WinError 448] ... untrusted mount point` while the Settings
+  page inspected a Whisper model in the old Hugging Face cache, whose snapshot files are symbolic
+  links into `blobs`.
+  - Model inspection now catches only filesystem errors (`OSError`) around each path check and
+    reports a state per model: installed, not downloaded, incomplete, or cannot be read (WinError 448,
+    access denied, broken links), with the reason.
+  - Settings shows the state and the reason; the main window always opens; transcription asks for a
+    usable model.
+  - **Import from the old cache:** links are read without being followed, only targets inside the
+    cache's `blobs` folder are accepted, the files are copied as plain files with checksum checks,
+    and nothing is downloaded or deleted.
+  - An unreadable custom model folder gives a clear message in Settings, when saving settings, and
+    when transcribing.
+  - Regression tests simulate WinError 448, PermissionError, missing files, broken links, links
+    outside the cache, damaged blobs, and valid and unavailable models.
+  - The packaged-app test now starts the EXE with a cache containing real Windows symbolic links and
+    a broken junction. The self-test builds the main window while WinError 448 is simulated.
+- **Safer CUDA fallback for transcription.** With "Automatic", CUDA is now tried only when a CUDA
+  device is visible **and** the CUDA 12 cuBLAS / cuDNN 9 DLLs exist. Only file names are checked;
+  nothing is loaded. Before, an NVIDIA GPU with the standard CPU build tried CUDA first. A missing
+  cuDNN can end the process inside CTranslate2 rather than raise an error the app could catch.
+  The reason is reported in the transcription warnings and in the Generate Captions dialog.
+  Choosing "CUDA" explicitly still tries CUDA first.
+- The environment check reported the bundled YuNet model as "not downloaded yet" in the packaged
+  app.
+
+### Added
+- `--check-env` now reports:
+  - packaged/source and portable mode;
+  - writable data, log, model and temp folders;
+  - where FFmpeg was found (Settings, bundled or PATH) and libx264/libx265;
+  - an NVENC test encode for **H.264 and H.265 separately**;
+  - CUDA libraries found or missing, and the device "Automatic" will use for transcription.
+- The self-test GPU check reports the same details.
+- `documentation/WINDOWS_ACCEPTANCE_TEST.md`: an acceptance checklist, an A/V sync test clip
+  recipe, diagnostic commands and a result template.
+
+## [0.7.0]
 
 Phases 4 to 7: Smart Cut, Resize & Crop, Bulk Processing and the AI provider manager.
 
