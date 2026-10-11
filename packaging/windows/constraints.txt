@@ -1,0 +1,40 @@
+# Exact versions for reproducible Windows builds (Python 3.12, win_amd64), resolved from
+# requirements.txt with `pip download --platform win_amd64 --python-version 3.12 --only-binary=:all:`.
+# Used as: pip install -r requirements-build.txt -c packaging/windows/constraints.txt
+# Update deliberately (re-resolve, rebuild, run the packaged self-test).
+anyio==4.15.1
+av==18.0.0
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.2
+ctranslate2==4.8.2
+faster-whisper==1.2.1
+filelock==4.1.0
+flatbuffers==25.12.19
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.7.0
+httpcore2==2.13.1
+httpx2==2.13.1
+huggingface-hub==2.2.0
+idna==3.20
+jaraco-context==6.1.2
+jaraco-functools==4.6.0
+jaraco.classes==3.4.0
+keyring==25.7.0
+more-itertools==11.1.0
+numpy==2.5.3
+onnxruntime==1.29.0
+opencv-python-headless==4.14.0.94
+packaging==26.3
+protobuf==7.36.2
+pycparser==3.11
+pyside6==6.12.0
+pyside6-addons==6.12.0
+pyside6-essentials==6.12.0
+pyyaml==6.0.3
+shiboken6==6.12.0
+tokenizers==0.23.3
+tqdm==4.70.1
+truststore==0.10.4
+typing-extensions==4.16.0
