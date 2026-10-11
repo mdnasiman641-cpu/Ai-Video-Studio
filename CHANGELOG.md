@@ -22,8 +22,12 @@ Fixes the v0.7.0 start-up crash (WinError 448) and prepares acceptance testing o
     when transcribing.
   - Regression tests simulate WinError 448, PermissionError, missing files, broken links, links
     outside the cache, damaged blobs, and valid and unavailable models.
-  - The packaged-app test now starts the EXE with a cache containing real Windows symbolic links and
-    a broken junction. The self-test builds the main window while WinError 448 is simulated.
+  - The packaged-app test now starts the EXE with a cache containing real Windows symbolic links (one
+    working, one broken) and a broken junction, and checks in the log that Settings reported the
+    broken model. On the build machine the step fails if the links cannot be created. The self-test
+    builds the main window while WinError 448 is simulated.
+  - Settings writes each unusable model, with its state and reason, to the log once ("Whisper model
+    is not usable").
 - **Safer CUDA fallback for transcription.** With "Automatic", CUDA is now tried only when a CUDA
   device is visible **and** the CUDA 12 cuBLAS / cuDNN 9 DLLs exist. Only file names are checked;
   nothing is loaded. Before, an NVIDIA GPU with the standard CPU build tried CUDA first. A missing

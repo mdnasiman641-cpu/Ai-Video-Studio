@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
@@ -37,6 +38,8 @@ from ai_video_studio.ui.widgets.output_settings import OutputSettingsForm
 from ai_video_studio.ui.widgets.common import Card, muted, open_folder, page_title, section_title
 from ai_video_studio.ui.widgets.tracking_options import TrackingOptions
 
+log = logging.getLogger(__name__)
+
 
 class ModelsCard(Card):
     """Downloaded Whisper models: status, size, download (background job) and delete."""
@@ -58,6 +61,7 @@ class ModelsCard(Card):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.setMinimumHeight(210)
         self._status: dict[str, dict] = {}
+        self._logged_problems: dict[str, str] = {}
         self.problems = QLabel("")
         self.problems.setObjectName("Warning")
         self.problems.setWordWrap(True)
@@ -96,6 +100,10 @@ class ModelsCard(Card):
                           "state": "inaccessible", "label": "Cannot be read", "problem": str(exc),
                           "importable": False, "path": None, "size_mb": None}
             self._status[name] = status
+            if status["problem"] and self._logged_problems.get(name) != status["problem"]:
+                log.warning("Whisper model is not usable", extra={"model": name, "state": status["state"],
+                                                                   "problem": status["problem"]})
+            self._logged_problems[name] = status["problem"] or ""
             job = active.get(name)
             if job is not None:
                 text = f"Downloading… {int(job.progress * 100)}%" if job.state is JobState.RUNNING else "Queued"

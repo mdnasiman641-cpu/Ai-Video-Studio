@@ -108,20 +108,40 @@ Step "Start-up with an old Hugging Face model cache containing links (Settings m
     New-Item -ItemType Directory -Force -Path (Join-Path $cache "blobs"), $snapshot | Out-Null
     $blob = Join-Path $cache "blobs\0123456789abcdef0123456789abcdef01234567"
     Set-Content -Path $blob -Value "{}"
+    $configLink = Join-Path $snapshot "config.json"
+    $modelLink = Join-Path $snapshot "model.bin"
+    $junction = Join-Path $linkData "models\models--Systran--faster-whisper-tiny"
     try {
-        New-Item -ItemType SymbolicLink -Path (Join-Path $snapshot "config.json") -Target $blob | Out-Null
-        New-Item -ItemType SymbolicLink -Path (Join-Path $snapshot "model.bin") -Target (Join-Path $cache "blobs\missing") | Out-Null
-        $gone = Join-Path $Work "junction-target"
-        New-Item -ItemType Directory -Force -Path $gone | Out-Null
-        New-Item -ItemType Junction -Path (Join-Path $linkData "models\models--Systran--faster-whisper-tiny") -Target $gone | Out-Null
-        Remove-Item $gone
+        New-Item -ItemType SymbolicLink -Path $configLink -Target $blob | Out-Null
+        # New-Item refuses targets that do not exist, so the broken links point at
+        # something that is deleted afterwards.
+        $goneBlob = Join-Path $cache "blobs\fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        Set-Content -Path $goneBlob -Value "x"
+        New-Item -ItemType SymbolicLink -Path $modelLink -Target $goneBlob | Out-Null
+        Remove-Item $goneBlob
+        $goneDir = Join-Path $Work "junction-target"
+        New-Item -ItemType Directory -Force -Path $goneDir | Out-Null
+        New-Item -ItemType Junction -Path $junction -Target $goneDir | Out-Null
+        Remove-Item $goneDir
     } catch {
-        Write-Host "  links not created (needs Developer Mode or administrator rights): $($_.Exception.Message)"
+        Write-Host "  link creation failed: $($_.Exception.Message)"
+    }
+    $made = @($configLink, $modelLink, $junction | Where-Object { (Get-Item -Force -LiteralPath $_ -ErrorAction SilentlyContinue).LinkType })
+    Write-Host "  links created: $($made.Count) of 3"
+    if ($made.Count -ne 3) {
+        if ($env:GITHUB_ACTIONS -eq "true") { throw "could not create the test links on the build machine" }
+        Write-Host "  (creating links needs Developer Mode or administrator rights; only start-up is checked)"
     }
     $code = Run-Exe $Gui @("--smoke-test") $linkData 180
     if ($code -ne 0) { throw "exit code $code" }
     $log = Join-Path $linkData "logs\ai_video_studio.log"
     if (-not (Select-String -Path $log -Pattern "Smoke test passed" -Quiet)) { throw "no 'Smoke test passed' in $log" }
+    if ($made.Count -eq 3) {
+        # Settings must have inspected the linked cache and reported the broken model.bin link.
+        $line = Select-String -Path $log -Pattern 'Whisper model is not usable.*"model": "small"' | Select-Object -First 1
+        if (-not $line) { throw "Settings did not report the broken 'small' model in $log" }
+        Write-Host "  logged: $($line.Line)"
+    }
 }
 
 if ($WhisperModel) {

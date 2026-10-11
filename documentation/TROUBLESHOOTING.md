@@ -15,8 +15,9 @@
 **What v0.7.1 does.**
 - Model folders are inspected without letting filesystem errors escape. Each model shows a state in
   Settings → Speech recognition models: Downloaded, Not downloaded, Incomplete download, or Cannot be
-  read (with the reason in the tooltip and below the table). The rest of the app works normally;
-  transcription asks for a usable model.
+  read (with the reason in the tooltip and below the table). The same reason is written once to the
+  log as "Whisper model is not usable". The rest of the app works normally; transcription asks for
+  a usable model.
 - A model in the old cache that cannot be read through its links shows "can be imported from the old
   cache". **Import Selected** reads each link as text (without following it), accepts only targets
   inside the cache's own `blobs` folder, and copies the files into `models\whisper\<model>` as plain
