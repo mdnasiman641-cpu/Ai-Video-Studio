@@ -38,6 +38,15 @@ def _choice(*options: str) -> Callable[[Any], str | None]:
     return lambda v: None if v in options else f"must be one of {', '.join(options)}"
 
 
+def _float_range(low: float, high: float) -> Callable[[Any], str | None]:
+    return lambda v: None if low <= v <= high else f"must be between {low:g} and {high:g}"
+
+
+# Auto reframe defaults for videos that have not been reframed yet (each video then keeps its
+# own copy in the project). Ranges match reframe.model.ReframeSettings.validate().
+_TRACKING_MODES = ("auto_face", "active_speaker", "speech_audio", "manual", "auto_visible", "center")
+
+
 SETTINGS: dict[str, SettingSpec] = {
     "ffmpeg_dir": SettingSpec(str, "", "FFmpeg folder", _optional_dir),
     "projects_dir": SettingSpec(str, str(default_projects_dir()), "Default projects folder"),
@@ -63,6 +72,29 @@ SETTINGS: dict[str, SettingSpec] = {
     "gemini_model": SettingSpec(str, "gemini-2.5-flash", "Gemini model", _non_empty),
     "openai_model": SettingSpec(str, "gpt-4.1-mini", "OpenAI model", _non_empty),
     "ai_timeout_seconds": SettingSpec(int, 60, "AI request timeout (s)", _int_range(10, 300)),
+    # Auto reframe / tracking defaults
+    "reframe_tracking_mode": SettingSpec(str, "auto_face", "Tracking mode", _choice(*_TRACKING_MODES)),
+    "reframe_confidence_threshold": SettingSpec(float, 0.6, "Tracking confidence threshold", _float_range(0.3, 0.99)),
+    "reframe_speech_threshold": SettingSpec(float, 0.5, "Speech-activity threshold", _float_range(0.1, 0.95)),
+    "reframe_switch_seconds": SettingSpec(float, 1.0, "Speaker-switch confirmation (s)", _float_range(0.0, 5.0)),
+    "reframe_speaker_hold_seconds": SettingSpec(float, 3.0, "Keep last speaker when uncertain (s)",
+                                                _float_range(0.0, 15.0)),
+    "reframe_hold_seconds": SettingSpec(float, 1.0, "Subject-lost hold (s)", _float_range(0.0, 10.0)),
+    "reframe_smoothing": SettingSpec(float, 0.5, "Camera smoothing", _float_range(0.0, 1.0)),
+    "reframe_padding": SettingSpec(float, 0.2, "Crop padding", _float_range(0.0, 1.0)),
+    "reframe_max_upscale": SettingSpec(float, 2.0, "Maximum upscale factor", _float_range(1.0, 4.0)),
+    "reframe_fallback": SettingSpec(str, "center", "Fallback", _choice("hold", "center", "group")),
+    "reframe_analysis_fps": SettingSpec(float, 5.0, "Analysis frame rate", _float_range(0.5, 30.0)),
+    "reframe_av_fps": SettingSpec(float, 15.0, "Mouth analysis frame rate", _float_range(5.0, 30.0)),
+}
+
+# Settings key -> ReframeSettings field
+REFRAME_DEFAULT_KEYS = {
+    "reframe_tracking_mode": "tracking_mode", "reframe_confidence_threshold": "confidence_threshold",
+    "reframe_speech_threshold": "speech_threshold", "reframe_switch_seconds": "switch_seconds",
+    "reframe_speaker_hold_seconds": "speaker_hold_seconds", "reframe_hold_seconds": "hold_seconds",
+    "reframe_smoothing": "smoothing", "reframe_padding": "padding", "reframe_max_upscale": "max_upscale",
+    "reframe_fallback": "fallback", "reframe_analysis_fps": "analysis_fps", "reframe_av_fps": "av_fps",
 }
 
 
@@ -150,6 +182,10 @@ class SettingsStore:
                 return int(value)
             if spec.type is str:
                 return "" if value is None else str(value).strip()
+            if spec.type is float:
+                if isinstance(value, bool):
+                    raise ValueError
+                return round(float(value), 4)
             return spec.type(value)
         except (TypeError, ValueError):
             raise SettingsError(f"{spec.label}: invalid value {value!r}") from None

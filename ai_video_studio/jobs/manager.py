@@ -60,6 +60,12 @@ class JobManager:
     def add_listener(self, listener: Callable[[Job], None]) -> None:
         self._listeners.append(listener)
 
+    def remove_listener(self, listener: Callable[[Job], None]) -> None:
+        try:
+            self._listeners.remove(listener)
+        except ValueError:
+            pass
+
     @property
     def max_concurrent(self) -> int:
         return self._max_concurrent

@@ -147,7 +147,7 @@ def test_srt_import_export_and_persistence(qtbot, window, tmp_path):
     path = tmp_path / "proj.avsproj"
     assert window._save(str(path))
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["version"] == 3 and data["media"][0]["caption_style"]["font_size"] == 77
+    assert data["version"] == 4 and data["media"][0]["caption_style"]["font_size"] == 77
     loaded = Project.load(path).media[0]
     assert [s.text for s in loaded.captions.segments] == ["বাংলা লাইন", "Second"]
     assert loaded.caption_style.vertical == "top"
@@ -229,10 +229,11 @@ def test_ai_correction_review_flow(qtbot, window, monkeypatch):
     assert page.review_button.text() == "Review Suggestions (2)"
     assert texts(page) == ["Hello everyone.", "Welcome back."]       # nothing applied automatically
 
-    dialog = CorrectionReviewDialog(track.pending_corrections)
+    dialog = CorrectionReviewDialog(track.pending_corrections, page)  # parented like in the app
     assert dialog.accepted_ids() == set()                            # unchecked by default
     dialog.set_checked(0, True)
     page.finish_review(CorrectionReviewDialog.APPLY, dialog.accepted_ids())
+    dialog.deleteLater()
     assert texts(page) == ["Hello, everyone.", "Welcome back."]
     assert not window.controller.project.media[0].captions.pending_corrections
     assert not page.review_button.isEnabled()

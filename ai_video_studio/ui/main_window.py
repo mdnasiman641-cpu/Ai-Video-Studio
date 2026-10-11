@@ -59,8 +59,10 @@ class MainWindow(QMainWindow):
     def __init__(self, services: Services):
         super().__init__()
         self.services = services
-        self.bridge = JobBridge(services)
-        self.controller = ProjectController(services, self.bridge)
+        # Parented to the window so they are destroyed with it, not later in arbitrary order at
+        # interpreter exit (which crashed in QObject::~QObject).
+        self.bridge = JobBridge(services, parent=self)
+        self.controller = ProjectController(services, self.bridge, parent=self)
         self.setWindowIcon(app_icon())
         self.setAcceptDrops(True)
         self.resize(1440, 900)

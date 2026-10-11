@@ -136,6 +136,12 @@ def main(argv: list[str] | None = None) -> int:
         code = 1 if _unhandled_errors else 0
         log.info("Smoke test %s", "passed" if code == 0 else "FAILED: " + "; ".join(_unhandled_errors),
                  extra={"platform": app.platformName()})
+    # Destroy the window (and the media players it owns) now, while the QApplication still
+    # exists, instead of leaving it to PySide's object cleanup at interpreter exit.
+    from PySide6.QtCore import QEvent
+
+    window.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
     clean = services.close()
     log.info("Shut down")
     if not clean:

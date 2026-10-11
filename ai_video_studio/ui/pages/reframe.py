@@ -44,11 +44,18 @@ from ai_video_studio.reframe.framing import (
     output_size_options,
     suitable_subjects,
 )
-from ai_video_studio.reframe.model import ReframeError, ReframeSettings, TrackingAnalysis
+from ai_video_studio.reframe.model import (
+    TRACKING_MODES,
+    ReframeError,
+    ReframeSettings,
+    TrackingAnalysis,
+    reanalysis_reasons,
+)
 from ai_video_studio.ui.caption_dialogs import FramePreviewDialog
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController
 from ai_video_studio.ui.widgets.caption_overlay import paint_captions
 from ai_video_studio.ui.widgets.common import muted, page_title
+from ai_video_studio.ui.widgets.tracking_options import TrackingOptions
 from ai_video_studio.ui.widgets.video_preview import VideoPreview
 
 log = logging.getLogger(__name__)
@@ -58,7 +65,8 @@ OTHER = QColor("#6aa6ff")
 CROP = QColor("#ffffff")
 SAFE = QColor(255, 184, 77, 70)
 STATE_TEXT = {"tracked": "Following subject #{id}", "held": "Subject briefly lost: holding framing",
-              "lost": "No subject: returning to centre", "center": "Center crop (no tracking)"}
+              "lost": "Nobody to follow: using the fallback", "silence": "Silence: holding the framing",
+              "center": "Center crop (no tracking)"}
 
 
 def _spin(low: float, high: float, step: float, decimals: int = 2, suffix: str = "") -> QDoubleSpinBox:
@@ -178,6 +186,11 @@ class ReframePage(QWidget):
         ob.addWidget(QLabel("Reframed output"))
         ob.addWidget(self.output, 1)
         ob.addWidget(self.output_info)
+        self.live_status = QLabel("")
+        self.live_status.setObjectName("Muted")
+        self.live_status.setWordWrap(True)
+        self.live_status.setToolTip("Status at the playhead, from the stored analysis")
+        ob.addWidget(self.live_status)
         self.preview_button = QPushButton("Exact Frame Preview")
         self.preview_button.setToolTip("Render the current frame with FFmpeg exactly as it will be exported")
         self.export_button = QPushButton("Export Reframed Video…")
@@ -190,22 +203,22 @@ class ReframePage(QWidget):
         previews.setStretchFactor(0, 3)
         previews.setStretchFactor(1, 2)
 
-        # -- 1. analysis --
-        self.analysis_fps = _spin(0.5, 15, 1, 1, " frames/s")
-        self.analysis_fps.setToolTip("How many frames per second of video are analysed. Higher follows fast "
-                                     "movement better but takes longer.")
+        # -- 1. tracking mode and analysis --
+        self.tracking = TrackingOptions()
+        self.mode = self.tracking.mode  # the tracking mode selector
         self.detect_persons = QCheckBox("Detect full bodies when no face is visible (slower)")
+        self.reanalysis = QLabel("")
+        self.reanalysis.setObjectName("Warning")
+        self.reanalysis.setWordWrap(True)
         self.analysis_info = muted("")
-        g1 = QGroupBox("1. Analysis")
-        f1 = QFormLayout(g1)
-        f1.addRow("Analyse:", self.analysis_fps)
-        f1.addRow(self.detect_persons)
-        f1.addRow(self.analysis_info)
+        g1 = QGroupBox("1. Tracking mode")
+        f1 = QVBoxLayout(g1)
+        f1.addWidget(self.tracking)
+        f1.addWidget(self.detect_persons)
+        f1.addWidget(self.reanalysis)
+        f1.addWidget(self.analysis_info)
 
         # -- 2. subject --
-        self.mode = QComboBox()
-        self.mode.addItem("Follow a subject (tracking)", "track")
-        self.mode.addItem("Center crop (no tracking)", "center")
         self.subjects = QListWidget()
         self.subjects.setMinimumHeight(110)
         self.subjects.setToolTip("Select a subject, then choose when to follow it. Double-click to jump to "
@@ -216,9 +229,8 @@ class ReframePage(QWidget):
         self.switch_button.setToolTip("From the current position onwards, follow the selected subject instead")
         self.clear_switches_button = QPushButton("Clear Subject Changes")
         self.switches_info = muted("")
-        g2 = QGroupBox("2. Subject")
+        self.subject_group = g2 = QGroupBox("2. Subject")
         v2 = QVBoxLayout(g2)
-        v2.addWidget(self.mode)
         v2.addWidget(self.subjects)
         row = QHBoxLayout()
         row.addWidget(self.follow_button)
@@ -240,8 +252,6 @@ class ReframePage(QWidget):
         # -- 4. framing --
         self.zoom = _spin(1.0, 4.0, 0.1, 2, "×")
         self.zoom.setToolTip("1× is the largest crop that fits the frame; higher values zoom in")
-        self.padding = _spin(0, 100, 5, 0, " %")
-        self.padding.setToolTip("Space kept around the face (or upper body), as a percentage of its size")
         self.subject_y = _spin(10, 90, 5, 0, " %")
         self.subject_y.setToolTip("Where the subject sits vertically in the frame (0 % = top, 100 % = bottom)")
         self.offset_x = _spin(-50, 50, 1, 0, " %")
@@ -252,41 +262,36 @@ class ReframePage(QWidget):
         g4 = QGroupBox("4. Framing")
         f4 = QFormLayout(g4)
         f4.addRow("Zoom:", self.zoom)
-        f4.addRow("Padding:", self.padding)
         f4.addRow("Subject height:", self.subject_y)
         f4.addRow("Horizontal offset:", self.offset_x)
         f4.addRow("Vertical offset:", self.offset_y)
         f4.addRow(self.reset_button)
 
         # -- 5. camera motion --
-        self.smoothing = _spin(0, 100, 5, 0, " %")
-        self.smoothing.setToolTip("Removes jitter from the detections. Applied without delay.")
         self.follow_speed = _spin(0.05, 5.0, 0.1, 2, " widths/s")
         self.follow_speed.setToolTip("Fastest camera movement, in crop widths per second")
         self.dead_zone = _spin(0, 40, 1, 0, " %")
         self.dead_zone.setToolTip("Movements smaller than this share of the frame do not move the camera")
-        self.hold = _spin(0, 10, 0.5, 1, " s")
-        self.hold.setToolTip("How long the framing is held when the subject disappears before it returns to centre")
         self.transition = _spin(0, 5, 0.1, 1, " s")
         self.transition.setToolTip("Length of the pan when the followed subject changes or reappears")
-        g5 = QGroupBox("5. Camera motion")
+        self.motion_group = g5 = QGroupBox("5. Camera motion")
         f5 = QFormLayout(g5)
-        f5.addRow("Smoothing:", self.smoothing)
         f5.addRow("Max speed:", self.follow_speed)
         f5.addRow("Dead zone:", self.dead_zone)
-        f5.addRow("Hold when lost:", self.hold)
         f5.addRow("Transition:", self.transition)
 
         # -- 6. captions --
         self.caption_safe = QComboBox()
-        for label, key in (("Off", "off"), ("Bottom", "bottom"), ("Top", "top")):
+        for label, key in (("Caption area from the caption style", "auto"), ("Off", "off"),
+                           ("Bottom area", "bottom"), ("Top area", "top")):
             self.caption_safe.addItem(label, key)
         self.caption_safe_height = _spin(5, 50, 1, 0, " %")
         self.burn_captions = QCheckBox("Burn in captions")
         g6 = QGroupBox("6. Captions")
         f6 = QFormLayout(g6)
         f6.addRow("Keep face clear of:", self.caption_safe)
-        f6.addRow("Caption area height:", self.caption_safe_height)
+        self._caption_height_label = QLabel("Caption area height:")
+        f6.addRow(self._caption_height_label, self.caption_safe_height)
         f6.addRow(self.burn_captions)
         f6.addRow(muted("Caption text, timing and style are not changed here; edit them on the Captions page. "
                         "Caption sizes scale with the output height, as for any export."))
@@ -327,15 +332,15 @@ class ReframePage(QWidget):
         self.reset_button.clicked.connect(self.reset_framing)
         self.subjects.currentRowChanged.connect(lambda _r: self._update_buttons())
         self.subjects.itemDoubleClicked.connect(self._jump_to_subject)
-        for combo in (self.mode, self.preset, self.size_combo, self.caption_safe):
+        self.tracking.changed.connect(self._on_control_changed)
+        for combo in (self.preset, self.size_combo, self.caption_safe):
             combo.currentIndexChanged.connect(lambda _i: self._on_control_changed())
-        for spin in (self.analysis_fps, self.zoom, self.padding, self.subject_y, self.offset_x, self.offset_y,
-                     self.smoothing, self.follow_speed, self.dead_zone, self.hold, self.transition,
-                     self.caption_safe_height):
+        for spin in (self.zoom, self.subject_y, self.offset_x, self.offset_y, self.follow_speed, self.dead_zone,
+                     self.transition, self.caption_safe_height):
             spin.valueChanged.connect(lambda _v: self._on_control_changed())
         for box in (self.detect_persons, self.burn_captions):
             box.toggled.connect(lambda _v: self._on_control_changed())
-        self.preview.position_changed.connect(lambda _ms: self.output.update())
+        self.preview.position_changed.connect(lambda _ms: self._on_position())
         self.preview.canvas.sink.videoFrameChanged.connect(lambda _f: self.output.update())
 
         controller.media_list_changed.connect(self.refresh_media)
@@ -356,8 +361,8 @@ class ReframePage(QWidget):
         cuda = opencv_cuda_devices()
         detection = (f"Detection: OpenCV {version} on the CPU" +
                      ("" if cuda else " (this OpenCV build has no CUDA support; that is normal for pip builds)"))
-        return (f"{detection}. Export encoder: chosen at export from Settings; NVIDIA NVENC is used only if a "
-                f"test encode succeeds, otherwise the CPU encoder (libx264).")
+        return (f"{detection}. Speech activity: Silero VAD on the CPU. Export encoder: chosen at export from "
+                f"Settings; NVIDIA NVENC is used only if a test encode succeeds, otherwise the CPU encoder (libx264).")
 
     def current(self) -> MediaItem | None:
         if self.controller.project is None or self._media_id is None:
@@ -470,20 +475,16 @@ class ReframePage(QWidget):
         try:
             item = self.current()
             s = self.settings()
-            self.analysis_fps.setValue(s.analysis_fps)
+            self.tracking.set_values(s.to_dict())
             self.detect_persons.setChecked(s.detect_persons)
-            self.mode.setCurrentIndex(max(0, self.mode.findData(s.mode)))
             self.preset.setCurrentIndex(max(0, self.preset.findData(s.preset)))
             self._fill_output_sizes(s)
             self.zoom.setValue(s.zoom)
-            self.padding.setValue(s.padding * 100)
             self.subject_y.setValue(s.subject_y * 100)
             self.offset_x.setValue(s.offset_x * 100)
             self.offset_y.setValue(s.offset_y * 100)
-            self.smoothing.setValue(s.smoothing * 100)
             self.follow_speed.setValue(s.follow_speed)
             self.dead_zone.setValue(s.dead_zone * 100)
-            self.hold.setValue(s.hold_seconds)
             self.transition.setValue(s.transition_seconds)
             self.caption_safe.setCurrentIndex(max(0, self.caption_safe.findData(s.caption_safe)))
             self.caption_safe_height.setValue(s.caption_safe_height * 100)
@@ -541,18 +542,18 @@ class ReframePage(QWidget):
         current = self.settings()
         data = self.size_combo.currentData() if self.size_combo.currentIndex() > 0 else None
         size = [int(v) for v in data.split("x")] if data else None
-        return ReframeSettings(
-            mode=self.mode.currentData(), preset=self.preset.currentData(),
+        values = current.to_dict() | self.tracking.values() | dict(
+            preset=self.preset.currentData(),
             output_width=size[0] if size else 0, output_height=size[1] if size else 0,
             target=current.target, switches=[list(r) for r in current.switches],
-            zoom=self.zoom.value(), padding=self.padding.value() / 100, subject_y=self.subject_y.value() / 100,
+            zoom=self.zoom.value(), subject_y=self.subject_y.value() / 100,
             offset_x=self.offset_x.value() / 100, offset_y=self.offset_y.value() / 100,
-            smoothing=self.smoothing.value() / 100, follow_speed=self.follow_speed.value(),
-            dead_zone=self.dead_zone.value() / 100, hold_seconds=self.hold.value(),
+            follow_speed=self.follow_speed.value(), dead_zone=self.dead_zone.value() / 100,
             transition_seconds=self.transition.value(), caption_safe=self.caption_safe.currentData(),
             caption_safe_height=self.caption_safe_height.value() / 100, burn_captions=self.burn_captions.isChecked(),
-            analysis_fps=self.analysis_fps.value(), detect_persons=self.detect_persons.isChecked(),
+            detect_persons=self.detect_persons.isChecked(),
         )
+        return ReframeSettings(**values)
 
     def _on_control_changed(self) -> None:
         if self._refreshing or self.current() is None:
@@ -604,10 +605,11 @@ class ReframePage(QWidget):
         if self.current() is None:
             return
         current = self._settings_from_controls()
-        defaults = ReframeSettings()
-        keep = {k: getattr(current, k) for k in ("preset", "output_width", "output_height", "caption_safe",
-                                                 "caption_safe_height", "burn_captions", "analysis_fps",
-                                                 "detect_persons")}
+        defaults = self.controller.default_reframe_settings()
+        keep = {k: getattr(current, k) for k in ("tracking_mode", "preset", "output_width", "output_height",
+                                                 "caption_safe", "caption_safe_height", "burn_captions",
+                                                 "analysis_fps", "av_fps", "detect_persons",
+                                                 "confidence_threshold", "speech_threshold")}
         settings = ReframeSettings(**(defaults.to_dict() | keep))
         self._apply(settings)
         self._load_controls()
@@ -630,6 +632,7 @@ class ReframePage(QWidget):
                 self._path_error = str(exc)
         self._update_warnings()
         self._update_output_info()
+        self._update_live_status()
         self._update_buttons()
         self.preview.refresh_overlay()
         self.output.update()
@@ -640,14 +643,58 @@ class ReframePage(QWidget):
         analysis = self.analysis()
         if item is not None and self.controller.analysis_is_stale(item):
             messages.append("The video file changed after it was analysed. Analyse it again.")
-        if analysis is not None and self.settings().mode == "track":
+        reasons = reanalysis_reasons(analysis, self.settings()) if analysis is not None else []
+        if analysis is not None and self.settings().tracks_subjects and not reasons:
             messages += analysis.warnings
         if self._path is not None:
             messages += self._path.warnings
-        elif self._path_error:
+        elif self._path_error and not reasons:
             messages.append(self._path_error)
+        self._update_reanalysis(reasons)
         self.warnings.setText("\n".join(f"⚠ {m}" for m in messages))
         self.warnings.setVisible(bool(messages))
+
+    def _update_reanalysis(self, reasons: list[str]) -> None:
+        mode = self.settings().mode_info.label
+        if self.settings().tracking_mode == "center":
+            text = ""
+        elif self.analysis() is None:
+            text = f"{mode} needs an analysis of this video. Click Analyse Video."
+        elif reasons:
+            text = ("Reanalysis required: " + " ".join(reasons) + " The stored results are kept until you click "
+                    "Analyse Video, and are not used for this mode.")
+        else:
+            text = ""
+        self.reanalysis.setText(text)
+        self.reanalysis.setVisible(bool(text))
+
+    def _on_position(self) -> None:
+        self.output.update()
+        self._update_live_status()
+
+    def _update_live_status(self) -> None:
+        """Mode, subject, detection, speech and crop status at the playhead (from stored data only)."""
+        settings = self.settings()
+        lines = [f"Mode: {settings.mode_info.label}"]
+        path, analysis = self._path, self.analysis()
+        t = self.preview.position_seconds()
+        if path is not None:
+            state = path.state_at(t)
+            followed = path.followed_at(t)
+            lines.append("Tracking: " + STATE_TEXT.get(state, state).format(id=followed))
+            lines.append(f"Crop: {path.crop_w}×{path.crop_h}, upscale {path.upscale:.2f}×")
+        if analysis is not None and settings.tracks_subjects and not reanalysis_reasons(analysis, settings):
+            tolerance = analysis.sample_interval * 0.75
+            seen = sum(1 for tr in analysis.tracks if tr.box_at(t, tolerance, 0.0) is not None)
+            lines.append(f"Faces/people detected here: {seen}")
+            if analysis.speech is not None:
+                prob = analysis.speech.prob_at(t)
+                lines.append(f"Speech: {'yes' if prob >= settings.speech_threshold else 'no'} "
+                             f"(voice activity {prob:.2f})")
+            if settings.tracking_mode == "active_speaker" and path is not None:
+                score = path.speaker_score_at(t)
+                lines.append("Speaker evidence: " + (f"{score:.2f}" if score is not None else "none at this moment"))
+        self.live_status.setText("\n".join(lines))
 
     def _update_output_info(self) -> None:
         if self._path is None or self.output_size() is None:
@@ -658,8 +705,10 @@ class ReframePage(QWidget):
         detail = (f"upscaled {scale:.2f}×" if scale > 1.01 else f"downscaled {scale:.2f}×" if scale < 0.99
                   else "not scaled")
         tracked = (f" · subject in frame {self._path.tracked_fraction:.0%} of the time"
-                   if self.settings().mode == "track" else "")
-        self.output_info.setText(f"Output {ow}×{oh} · crop {self._path.crop_w}×{self._path.crop_h} ({detail}){tracked}")
+                   if self.settings().tracks_subjects else "")
+        notes = "".join(f"\n{n}" for n in self._path.notes)
+        self.output_info.setText(f"Output {ow}×{oh} · crop {self._path.crop_w}×{self._path.crop_h} ({detail})"
+                                 f"{tracked}{notes}")
 
     def _update_analysis_info(self) -> None:
         analysis = self.analysis()
@@ -668,9 +717,19 @@ class ReframePage(QWidget):
             return
         faces = sum(1 for t in analysis.tracks if t.kind == "face")
         persons = len(analysis.tracks) - faces
-        self.analysis_info.setText(
-            f"{analysis.frames_analyzed} frames analysed at {analysis.sample_fps:g}/s · {faces} face(s), "
-            f"{persons} full-body subject(s) · {analysis.detector}")
+        parts = []
+        if analysis.frames_analyzed:
+            parts.append(f"{analysis.frames_analyzed} frames at {analysis.sample_fps:g}/s · {faces} face(s), "
+                         f"{persons} full-body subject(s)")
+        labels = {"mouth": "mouth movement", "speech": "speech"}
+        extra = [labels[f] for f in ("mouth", "speech") if analysis.has(f)]
+        if extra:
+            parts.append("includes " + " and ".join(extra))
+        if analysis.detector:
+            parts.append(analysis.detector)
+        if analysis.speech is not None:
+            parts.append(analysis.speech.detector)
+        self.analysis_info.setText("Analysed: " + " · ".join(parts) + "".join(f"\n{n}" for n in analysis.notes))
 
     def _update_buttons(self) -> None:
         item = self.current()
@@ -678,12 +737,20 @@ class ReframePage(QWidget):
         running = bool(item and self.controller.active_jobs(self._media_id, REFRAME_ANALYZE_JOB))
         self.analyze_button.setEnabled(usable and not running and opencv_version() is not None)
         self.cancel_button.setEnabled(running)
-        tracking = self.mode.currentData() == "track"
+        info = TRACKING_MODES[self.tracking.current_mode()]
+        tracking = self.tracking.current_mode() != "center"
         has_analysis = self.analysis() is not None
-        self.subjects.setEnabled(tracking and has_analysis)
-        self.follow_button.setEnabled(tracking and has_analysis and self.subjects.currentRow() >= 0)
-        self.switch_button.setEnabled(tracking and has_analysis and self.subjects.currentRow() >= 0)
-        self.clear_switches_button.setEnabled(tracking and bool(self.settings().switches))
+        # Only the controls the selected mode uses are shown.
+        self.subject_group.setVisible(info.uses_subjects)
+        self.motion_group.setVisible(tracking)
+        self.detect_persons.setVisible(self.tracking.current_mode() in ("manual", "auto_visible", "speech_audio"))
+        custom = self.caption_safe.currentData() in ("bottom", "top")
+        self.caption_safe_height.setVisible(custom)
+        self._caption_height_label.setVisible(custom)
+        self.subjects.setEnabled(info.uses_subjects and has_analysis)
+        self.follow_button.setEnabled(info.uses_subjects and has_analysis and self.subjects.currentRow() >= 0)
+        self.switch_button.setEnabled(info.uses_subjects and has_analysis and self.subjects.currentRow() >= 0)
+        self.clear_switches_button.setEnabled(info.uses_subjects and bool(self.settings().switches))
         has_caps = bool(item and item.captions and item.captions.segments)
         self.burn_captions.setEnabled(has_caps)
         self.export_button.setEnabled(usable and self._path is not None)
@@ -719,7 +786,7 @@ class ReframePage(QWidget):
         font = QFont(painter.font())
         font.setPointSizeF(max(7.0, font.pointSizeF() * 0.9))
         painter.setFont(font)
-        if analysis is not None and settings.mode == "track":
+        if analysis is not None and settings.tracks_subjects:
             tolerance = analysis.sample_interval * 0.75
             for track in analysis.tracks:
                 sample = track.box_at(t, tolerance, settings.hold_seconds)
@@ -838,7 +905,7 @@ class ReframePage(QWidget):
             return
         problems = list(self._path.warnings)
         analysis = self.analysis()
-        if analysis is not None and self.settings().mode == "track":
+        if analysis is not None and self.settings().tracks_subjects:
             problems = analysis.warnings + problems
         if self.controller.analysis_is_stale(item):
             problems.insert(0, "The video file changed after it was analysed.")

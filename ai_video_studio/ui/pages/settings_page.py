@@ -23,8 +23,10 @@ from ai_video_studio.captions.transcriber import LANGUAGES, MODELS
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import SettingsError, StudioError
 from ai_video_studio.storage import secrets
+from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
 from ai_video_studio.services import Services
 from ai_video_studio.ui.widgets.common import Card, muted, open_folder, page_title, section_title
+from ai_video_studio.ui.widgets.tracking_options import TrackingOptions
 
 
 class SettingsPage(QWidget):
@@ -133,6 +135,15 @@ class SettingsPage(QWidget):
         eform.addRow("Quality (CRF/CQ):", self.video_quality)
         export.body.addLayout(eform)
 
+        # Tracking (auto reframe defaults)
+        self.tracking = TrackingOptions()
+        tracking = Card()
+        tracking.body.addWidget(section_title("Tracking (Auto Reframe)"))
+        tracking.body.addWidget(muted(
+            "Defaults for videos that have not been reframed yet. Each video keeps its own choice in the "
+            "project, which you can change on the Auto Reframe page at any time."))
+        tracking.body.addWidget(self.tracking)
+
         # AI correction
         self.ai_provider = QComboBox()
         self.ai_provider.addItem("Off", "none")
@@ -206,6 +217,7 @@ class SettingsPage(QWidget):
         inner.addWidget(general)
         inner.addWidget(captions)
         inner.addWidget(export)
+        inner.addWidget(tracking)
         inner.addWidget(ai)
         inner.addWidget(data)
         inner.addLayout(buttons)
@@ -251,7 +263,7 @@ class SettingsPage(QWidget):
             "gemini_model": self.gemini_model.text(),
             "openai_model": self.openai_model.text(),
             "ai_timeout_seconds": self.ai_timeout.value(),
-        }
+        } | {key: self.tracking.values()[field] for key, field in REFRAME_DEFAULT_KEYS.items()}
 
     def load(self) -> None:
         s = self.services.settings
@@ -274,6 +286,7 @@ class SettingsPage(QWidget):
         self.gemini_model.setText(s.get("gemini_model"))
         self.openai_model.setText(s.get("openai_model"))
         self.ai_timeout.setValue(s.get("ai_timeout_seconds"))
+        self.tracking.set_values({field: s.get(key) for key, field in REFRAME_DEFAULT_KEYS.items()})
         self.refresh_key_status()
 
     def save(self) -> bool:

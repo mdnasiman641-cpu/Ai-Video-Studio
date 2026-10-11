@@ -1,6 +1,5 @@
 """GUI tests for the AI Auto Reframe page (offscreen, real FFmpeg, colour-threshold detector)."""
 
-import subprocess
 import time
 
 import pytest
@@ -20,16 +19,6 @@ from tests.integration.test_reframe_jobs_real import red_detector
 from tests.reframe_helpers import face_at, make_analysis, make_track
 
 pytestmark = requires_ffmpeg
-
-
-@pytest.fixture(scope="module")
-def square_clip(tmp_path_factory):
-    path = tmp_path_factory.mktemp("rf") / "square.mp4"
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=0x303030:s=640x360:r=25:d=3",
-                    "-f", "lavfi", "-i", "color=c=red:s=50x50:r=25:d=3", "-f", "lavfi", "-i", "sine=duration=3",
-                    "-filter_complex", "[0:v][1:v]overlay=x='60+150*t':y=140[v]", "-map", "[v]", "-map", "2:a",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "3", str(path)], check=True)
-    return path
 
 
 @pytest.fixture
@@ -215,7 +204,7 @@ def test_cancel_analysis(qtbot, window):
     window.services.jobs.register(REFRAME_ANALYZE_JOB, make_reframe_analyze_handler(
         window.services.ffmpeg_path, lambda p: DetectorSet(slow, None, "slow", [])))
     page = window.reframe_page
-    page.analysis_fps.setValue(15)
+    page.tracking.spins["analysis_fps"][0].setValue(15)
     job = page.analyze()
     qtbot.waitUntil(lambda: page.cancel_button.isEnabled(), timeout=5000)
     page.cancel_analysis()

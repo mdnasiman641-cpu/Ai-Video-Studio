@@ -22,10 +22,11 @@ from ai_video_studio.jobs.caption_jobs import BURN_IN_JOB, CORRECTION_JOB, FRAME
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, REFRAME_EXPORT_JOB, REFRAME_PREVIEW_JOB
-from ai_video_studio.reframe.framing import CropPath, compute_crop_path, resolve_output_size
+from ai_video_studio.reframe.framing import CropPath, caption_band_from_style, compute_crop_path, resolve_output_size
 from ai_video_studio.reframe.model import ReframeSettings, ReframeState, TrackingAnalysis
 from ai_video_studio.services import Services
 from ai_video_studio.storage.project import Project
+from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +34,12 @@ log = logging.getLogger(__name__)
 class JobBridge(QObject):
     job_changed = Signal(object)
 
-    def __init__(self, services: Services):
-        super().__init__()
-        services.jobs.add_listener(self.job_changed.emit)
+    def __init__(self, services: Services, parent: QObject | None = None):
+        super().__init__(parent)
+        emit = self.job_changed.emit
+        services.jobs.add_listener(emit)
+        # Stop forwarding when this object is destroyed (jobs may still finish afterwards).
+        self.destroyed.connect(lambda *_: services.jobs.remove_listener(emit))
 
 
 class ImportReport:
@@ -76,8 +80,8 @@ class ProjectController(QObject):
     reframe_changed = Signal(str)       # media id: reframe settings or tracking results changed
     reframe_analysis_finished = Signal(str, object)  # media id, job (completed, failed or cancelled)
 
-    def __init__(self, services: Services, bridge: JobBridge):
-        super().__init__()
+    def __init__(self, services: Services, bridge: JobBridge, parent: QObject | None = None):
+        super().__init__(parent)
         self.services = services
         self.project: Project | None = None
         bridge.job_changed.connect(self._on_job_changed)
@@ -346,10 +350,21 @@ class ProjectController(QObject):
         self.corrections_ready.emit(media_id)
 
     # -- auto reframe ------------------------------------------------------------
+    def default_reframe_settings(self) -> ReframeSettings:
+        """Settings for a video that has not been reframed yet: the defaults from Settings → Tracking."""
+        settings = ReframeSettings()
+        for key, name in REFRAME_DEFAULT_KEYS.items():
+            setattr(settings, name, self.services.settings.get(key))
+        try:
+            settings.validate()
+        except StudioError:
+            return ReframeSettings()
+        return settings
+
     def reframe_state(self, media_id: str) -> ReframeState:
         """The video's reframe data (default settings if it has never been reframed)."""
         item = self.media(media_id)
-        return item.reframe if item.reframe is not None else ReframeState()
+        return item.reframe if item.reframe is not None else ReframeState(self.default_reframe_settings())
 
     def set_reframe_settings(self, media_id: str, settings: ReframeSettings) -> None:
         settings.validate()
@@ -383,10 +398,17 @@ class ProjectController(QObject):
             return active[0]
         settings = self.reframe_state(media_id).settings
         meta = item.metadata
+        if settings.tracking_mode == "center":
+            raise StudioError("Center Crop does not use an analysis. Choose a tracking mode first.")
+        features = settings.analysis_features()
+        if "speech" in features and not meta.has_audio:
+            raise StudioError(f"{settings.mode_info.label} needs speech from the audio, but this video has no "
+                              f"audio track. Use Auto Face Tracking or Manual Subject Tracking.")
         payload = {
             "path": item.path, "media_id": media_id,
             "width": meta.display_width, "height": meta.display_height, "duration": meta.duration,
-            "sample_fps": settings.analysis_fps, "detect_persons": settings.detect_persons,
+            "sample_fps": settings.analysis_rate(), "detect_persons": "persons" in features,
+            "features": features, "face_threshold": settings.confidence_threshold,
             "models_dir": str(paths.data_dir() / "models"),
         }
         return self.services.jobs.submit(REFRAME_ANALYZE_JOB, f"Analyse faces/people: {item.name}", payload,
@@ -399,8 +421,11 @@ class ProjectController(QObject):
             raise StudioError("Video information has not been read yet.")
         state = self.reframe_state(media_id)
         meta = item.metadata
+        band = None
+        if item.captions and item.captions.segments:
+            band = caption_band_from_style(item.effective_caption_style)
         return compute_crop_path(state.analysis, state.settings, meta.display_width, meta.display_height,
-                                 meta.duration)
+                                 meta.duration, caption_band=band)
 
     def reframe_output_size(self, media_id: str) -> tuple[int, int]:
         meta = self.media(media_id).metadata
@@ -433,7 +458,7 @@ class ProjectController(QObject):
             raise StudioError("Choose a different file name: the source video is never overwritten.")
         path = path or self.reframe_crop_path(media_id)
         state = self.reframe_state(media_id)
-        if state.settings.mode == "track" and path.tracked_fraction == 0:
+        if state.settings.tracking_mode in ("manual", "auto_face", "auto_visible") and path.tracked_fraction == 0:
             raise StudioError("The selected subject is never visible, so the export would not follow anyone. "
                               "Choose another subject or Center crop.")
         meta = item.metadata
