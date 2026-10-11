@@ -2,7 +2,61 @@
 
 All notable changes are listed here. Versions follow semantic versioning.
 
-## [0.3.1] - Unreleased
+## [0.3.2] - Unreleased
+
+Windows packaging: the app can be installed and run without Python. No new editing features.
+
+### Added
+- **Windows program** built with PyInstaller (one-folder):
+  - `AI-Video-Studio.exe` (no console window) and `AI-Video-Studio-Console.exe` (diagnostics),
+    both with the app icon and version information.
+  - Bundled: Qt Multimedia with its FFmpeg plugin, OpenCV, faster-whisper/CTranslate2,
+    onnxruntime (Silero VAD) and the YuNet face model.
+  - **FFmpeg 7.1.1 essentials (Gyan, GPL v3)** in `bin\`, downloaded at build time against a pinned
+    SHA-256, with its licence and source information in `licenses\ffmpeg\`.
+- **Inno Setup installer**:
+  - per-user by default, without admin rights; you can choose the folder;
+  - Start Menu entry and Tools folder (diagnostic console, environment check, self-test), optional
+    desktop icon, uninstall entry;
+  - upgrades in place;
+  - uninstall keeps settings, logs and models unless you choose to delete them (default No; a
+    silent uninstall never deletes them).
+- **Portable ZIP**. A `portable.txt` file next to the EXE keeps all data in `UserData\` beside it.
+- **Whisper model manager**:
+  - Settings → Speech recognition models: download as a background job with progress, delete,
+    open folder.
+  - Generate Captions asks before downloading a missing model, showing its size and destination.
+  - Downloads are checked against the sizes and SHA-256/git checksums published by Hugging Face,
+    pinned to one revision, resumed after interruption, retried with backoff, and checked for free
+    disk space first.
+  - Models are stored in `%LOCALAPPDATA%\AIVideoStudio\models\whisper\`. Models already in the
+    Hugging Face cache are reused.
+- **Command-line tools** in the packaged app: `--check-env`, `--self-test` (16 functional checks
+  inside the installed program, JSON report), `--download-model NAME`, `--help`.
+- **Build system**:
+  - `scripts\windows\build.bat` and `packaging/build.py`;
+  - locked dependency versions in `packaging/windows/constraints.txt`;
+  - outputs: `dist\AI-Video-Studio\`, ZIP, setup EXE, `build-info.json`, `SHA256SUMS.txt`.
+- **Windows build workflow** (`.github/workflows/build-windows.yml`):
+  - runs the tests, then builds;
+  - tests the packaged EXEs with no Python or FFmpeg on `PATH`: GUI start-up, console check,
+    model download, self-test, settings persistence, missing FFmpeg, portable ZIP, and installer
+    install, upgrade and uninstall;
+  - uploads the artifacts; tags `v*` publish a GitHub pre-release.
+  - `packaging/windows/test_packaged.ps1` runs the same tests on your PC.
+
+### Changed
+- FFmpeg is searched for in this order: the Settings folder, then `bin\` next to the EXE, then
+  `PATH`. The "not found" message explains each option.
+- The bundled YuNet model is used before any download, so auto reframe works offline in the
+  packaged app.
+
+### Not verified
+- GPU transcription and NVENC exports in the packaged app (no GPU on the CI runners). The standard
+  build is CPU-only; `build.py --gpu` (bundles CUDA runtime libraries) is experimental and untested.
+- The installer's interactive pages, SmartScreen and the look on a real Windows 10/11 desktop.
+
+## [0.3.1]
 
 Phase 3 upgrade: selectable tracking modes, active-speaker framing and tracking fixes.
 

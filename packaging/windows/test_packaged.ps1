@@ -4,7 +4,7 @@ and runnable on your own PC (that is how GPU/NVENC detection on your hardware ge
 
   powershell -ExecutionPolicy Bypass -File packaging\windows\test_packaged.ps1 `
       -AppDir dist\AI-Video-Studio -Assets build\test-assets -WhisperModel tiny `
-      -Zip dist\AI-Video-Studio-0.3.1-portable-win64.zip -Installer dist\AI-Video-Studio-0.3.1-setup-win64.exe
+      -Zip dist\AI-Video-Studio-0.3.2-portable-win64.zip -Installer dist\AI-Video-Studio-0.3.2-setup-win64.exe
 
 Every step runs with a PATH that contains only Windows itself, so Python, pip and any FFmpeg
 installed on the machine are invisible to the program.

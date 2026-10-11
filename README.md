@@ -3,7 +3,8 @@
 A Windows desktop video editor (Python + PySide6 + FFmpeg) built for 1080p
 short-form work: captions, face-tracked reframing, silence removal, resizing and
 batch export. It is being built in phases. **Phases 1 (foundation), 2 (captions)
-and 3 (face tracking and auto reframe) are done.** Later features are listed in the
+and 3 (face tracking and auto reframe) are done, and the app can be built as a Windows
+program (installer, portable ZIP) that needs no Python.** Later features are listed in the
 app as "planned" and are not presented as working.
 
 ## Status
@@ -19,7 +20,7 @@ app as "planned" and are not presented as working.
 | 6 | Bulk editing and batch export | Planned |
 | 7 | Gemini / OpenAI provider manager | Planned |
 | 8 | Hardware optimisation (NVENC, monitoring) | Planned |
-| 9 | Windows build and release (PyInstaller) | Planned |
+| 9 | Windows build and release (PyInstaller) | **Packaging done early (v0.3.2)**: EXE folder, installer and portable ZIP are built and the packaged program is tested on GitHub's Windows Server runner (see [Windows program](#windows-program-installer-and-portable-zip)); not yet tried on your PC. Release signing and later-phase features still to come |
 
 ### What works now (Phase 1)
 
@@ -314,7 +315,156 @@ needs careful proofreading in the caption editor. Five read-aloud sentences on a
 sample. Your own recordings (accent, noise, music) may do better or worse, so check quality on
 your own videos. GPU inference was not tested and should give the same text, only faster.
 
-## Requirements
+## Windows program (installer and portable ZIP)
+
+The app can be built into a normal Windows program. It needs **no Python**, no command prompt and
+no separately installed FFmpeg. Three outputs are produced (in `dist\`):
+
+| Output | What it is | When to use it |
+|--------|-----------|----------------|
+| `AI-Video-Studio-<version>-setup-win64.exe` (about 180 MB) | Inno Setup installer | Normal use. Start Menu entry, optional desktop icon, uninstall entry in Settings → Apps, upgrades in place |
+| `AI-Video-Studio-<version>-portable-win64.zip` (about 250 MB, about 680 MB unpacked) | The same program folder, zipped | No installation and no admin rights; for a USB drive or a machine where you can't install software |
+| `dist\AI-Video-Studio\` | The unpacked program folder (`AI-Video-Studio.exe` plus `_internal\`, `bin\`, `licenses\`) | Running straight after a build |
+
+There is **no single-file EXE**. A one-file PyInstaller EXE would unpack about 600 MB to a temporary
+folder on every start (slow, and often flagged by antivirus software), so the one-folder layout is used
+for both the installer and the ZIP.
+
+### Install
+
+1. Download the setup EXE (from a GitHub release, or the `ai-video-studio-windows` artifact of the
+   *Windows build* workflow run) and check it against `SHA256SUMS.txt` if you like:
+   `certutil -hashfile AI-Video-Studio-0.3.2-setup-win64.exe SHA256`.
+2. Run it. The installer is not code-signed, so Windows SmartScreen may say "Windows protected your
+   PC": click **More info → Run anyway**.
+3. By default it installs **for the current user only** in `%LOCALAPPDATA%\Programs\AI Video Studio`
+   (no admin rights). You can choose another folder, or "install for all users" (needs admin).
+4. Start **AI Video Studio** from the Start Menu. The Start Menu folder *AI Video Studio Tools*
+   also has a diagnostic console, an environment check and a self-test.
+
+**Upgrading**: run the newer setup EXE; it replaces the program files and keeps your settings,
+projects, models and logs. **Uninstalling** (Settings → Apps) removes the program; it then asks
+whether to also delete your settings, logs and downloaded models. The default answer is **No**,
+and a silent uninstall never deletes them. Projects and exported videos are never deleted.
+
+### Portable ZIP
+
+Unzip anywhere and run `AI-Video-Studio.exe`. Without further changes it keeps its data in the same
+place as the installed version (`%LOCALAPPDATA%\AIVideoStudio`). To keep everything next to the program
+(for example on a USB drive), create an empty file named `portable.txt` next to `AI-Video-Studio.exe`;
+data then goes to the `UserData\` folder beside it. Delete the folder to remove it.
+
+### What is in the program folder
+
+- `AI-Video-Studio.exe`: the app (no console window). `AI-Video-Studio-Console.exe`: the same app
+  with a console that shows the log, for diagnosing start-up problems, plus command-line tools:
+  ```bat
+  AI-Video-Studio-Console.exe --help
+  AI-Video-Studio-Console.exe --check-env            :: packages, FFmpeg, CUDA, NVENC, models
+  AI-Video-Studio-Console.exe --self-test            :: functional test of this installation
+  AI-Video-Studio-Console.exe --download-model small :: download a Whisper model (with progress)
+  ```
+- `bin\ffmpeg.exe`, `bin\ffprobe.exe`: **FFmpeg 7.1.1 "essentials" build by Gyan Doshi**
+  (GPL v3; includes libx264, libass and NVENC support). Its licence, the download URL, the
+  checksum and where to get the source are in `licenses\ffmpeg\`. The build downloads exactly that
+  file and checks its SHA-256. A folder chosen in **Settings → FFmpeg** takes priority, then `bin\`,
+  then `PATH`. If FFmpeg is missing, the app still starts and says how to fix it.
+- `_internal\`: Python 3.12, PySide6 (Qt 6, including Qt Multimedia and its FFmpeg plugin),
+  OpenCV (headless), faster-whisper, CTranslate2, onnxruntime (Silero VAD) and the YuNet face
+  model (230 KB, so auto reframe works offline).
+- `licenses\THIRD-PARTY-NOTICES.txt`, `README.txt`.
+
+### AI models (Whisper)
+
+Whisper models are **not** in the installer (they are 75 MB to 3 GB). They are downloaded only
+when you ask for them:
+- **Settings → Speech recognition models** lists each model with its size and status. **Download**
+  runs as a background job with progress; **Delete** removes a model; **Open Models Folder**
+  shows where they are.
+- If you click **Generate Captions** with a model that is not downloaded yet, the app asks first
+  and shows the size and the destination. Nothing is downloaded without that confirmation.
+- Every file is checked against the size and SHA-256 published by Hugging Face. Interrupted downloads
+  resume, failed ones are retried, and free disk space is checked first.
+- Models are stored in `%LOCALAPPDATA%\AIVideoStudio\models\whisper\<name>` (or `UserData\models` in
+  portable mode). They are kept across restarts, upgrades and reinstalls, and work offline once
+  downloaded. Models downloaded by older versions to the Hugging Face cache are reused.
+- Offline machine: copy a downloaded model folder over, or choose any faster-whisper (CTranslate2)
+  model folder in **Settings → Captions → Local model folder**.
+
+### GPU and CPU
+
+The standard build is a **CPU build**: it runs on any 64-bit Windows 10/11 PC and does not include
+NVIDIA libraries or drivers.
+- **Speech recognition**: CPU (int8). The app checks for CUDA and falls back to the CPU when it is
+  not available.
+- **Video encoding**: NVENC is used for exports when a 1-frame test encode succeeds (needs an NVIDIA GPU
+  and a current driver; the bundled FFmpeg supports NVENC). Otherwise libx264 on the CPU is used.
+  CUDA and NVENC are detected separately; `--check-env` and the self-test show both.
+- **Face detection and speech activity**: always CPU.
+
+`python packaging\build.py --gpu` makes an experimental build that also bundles the CUDA 12
+cuBLAS/cuDNN runtime (about 1 GB more) for GPU transcription. It never bundles a driver. **GPU
+transcription and NVENC encoding have not been tested yet**: GitHub's Windows runners have no
+NVIDIA GPU. On your RTX 4070, run `AI-Video-Studio-Console.exe --check-env` and the self-test to
+see whether CUDA and NVENC are usable.
+
+### Build it yourself
+
+On Windows 10/11 with Python 3.12 (64-bit) and Git:
+```bat
+winget install JRSoftware.InnoSetup      :: optional: needed only for the setup EXE
+git clone https://github.com/mdnasiman641-cpu/Ai-Video-Studio.git
+cd Ai-Video-Studio
+scripts\windows\build.bat
+```
+`build.bat` creates a separate `.venv-build` with the **locked** dependency versions
+(`packaging\windows\constraints.txt`), then runs `packaging\build.py`, which:
+1. renders the icon and version resources, downloads the YuNet model (checksum verified);
+2. runs PyInstaller with `packaging\windows\ai_video_studio.spec`;
+3. downloads and verifies the pinned FFmpeg build into `bin\` (`--ffmpeg none` leaves it out,
+   `--ffmpeg-dir DIR` uses your own copy);
+4. checks the folder layout, then writes the ZIP, the installer (if Inno Setup is installed),
+   `build-info.json` and `SHA256SUMS.txt`.
+
+Options: `--gpu`, `--no-zip`, `--no-installer`, `--ffmpeg none`, `--ffmpeg-dir DIR`.
+
+Then test the result as CI does:
+```bat
+powershell -ExecutionPolicy Bypass -File packaging\windows\test_packaged.ps1 -AppDir dist\AI-Video-Studio
+```
+Add `-Zip dist\AI-Video-Studio-0.3.2-portable-win64.zip -Installer dist\AI-Video-Studio-0.3.2-setup-win64.exe`
+to also test the ZIP, install, upgrade and uninstall (the installer test installs for the current user
+and uninstalls again), and `-WhisperModel tiny` to download a model and transcribe.
+
+### What was tested on the packaged program
+
+The [Windows build workflow](.github/workflows/build-windows.yml) runs on every push to the
+development branch and on `v*` tags (tags also publish a GitHub pre-release). It runs the test
+suite, builds everything, then tests **the packaged EXEs, not the source code**. They are started
+with a `PATH` that contains only the Windows system folders, so no Python or FFmpeg from the runner
+is used.
+
+| Check (on `windows-latest`, Windows Server 2025, no GPU) | Result for v0.3.1 build, commit 8150579 |
+|------|--------|
+| Program folder layout, EXE version info, GUI EXE has no console (PE subsystem check) | Passed |
+| GUI start-up with the native Windows platform (`--smoke-test`) | Passed |
+| Whisper model download through the app's downloader (tiny, from Hugging Face, checksums) | Passed |
+| Self-test inside the EXE: bundled FFmpeg/FFprobe found, video import (probe job), Qt Multimedia playback, SRT export and subtitle burn-in, CUDA/NVENC detection, bundled YuNet face detection, auto reframe analysis + export, Silero VAD, Whisper transcription (CPU fallback), project save/reopen, temp-file cleanup | 16 of 16 passed |
+| Settings persist across a restart (second self-test run) | Passed |
+| Program folder without `bin\ffmpeg.exe`: clear message, app still starts | Passed |
+| Portable ZIP with `portable.txt`: data goes to `UserData\` | Passed |
+| Installer: per-user silent install, Start Menu shortcut, uninstall entry | Passed |
+| Installed app starts and uses `%LOCALAPPDATA%\AIVideoStudio` | Passed |
+| Upgrade over the installed version keeps user data | Passed |
+| Uninstall removes program, shortcut and registry entry, keeps user data | Passed |
+
+**Needs your Windows 10/11 PC (not testable in CI):** clicking through the installer's pages and the
+uninstall question; SmartScreen; how the app looks on a real screen and with display scaling; playing
+your own videos; **GPU transcription and NVENC exports on the RTX 4070** (the runners have no GPU, so
+CI only checks that their absence is detected and the CPU is used); speed on your Ryzen 7 7700; a
+model download through your own network; antivirus software reactions.
+
+## Requirements (running from source)
 
 - Windows 10/11 64-bit
 - Python 3.12 (64-bit) from python.org. This is the version tested in CI; 3.10–3.13 should work but are untested.
@@ -336,7 +486,9 @@ your own videos. GPU inference was not tested and should give the same text, onl
 - Optional AI correction: a Gemini or OpenAI API key, set through the `GEMINI_API_KEY` /
   `OPENAI_API_KEY` environment variables or stored from Settings in the Windows Credential Manager.
 
-## Setup and run on your Windows PC
+## Setup and run from source on your Windows PC
+
+This is for development. To just use the app, install it (see [Windows program](#windows-program-installer-and-portable-zip)).
 
 1. Install **Python 3.12 (64-bit)** from https://www.python.org/downloads/windows/ and tick
    "Add python.exe to PATH" during setup.
@@ -371,7 +523,8 @@ your own videos. GPU inference was not tested and should give the same text, onl
    ```
 
 If the app does not start, look for `%LOCALAPPDATA%\AIVideoStudio\startup_error.log` and
-`%LOCALAPPDATA%\AIVideoStudio\logs\ai_video_studio.log`.
+`%LOCALAPPDATA%\AIVideoStudio\logs\ai_video_studio.log`, and see
+[TROUBLESHOOTING](documentation/TROUBLESHOOTING.md#the-app-does-not-start).
 
 Other scripts:
 
@@ -397,13 +550,19 @@ py -3.12 -m venv .venv
 | Settings, recent projects, job history | `%LOCALAPPDATA%\AIVideoStudio\studio.db` |
 | Logs (JSON lines, rotated 5 × 5 MB) | `%LOCALAPPDATA%\AIVideoStudio\logs\` |
 | Projects | wherever you save them (default `Documents\AI Video Studio Projects`) |
-| Whisper models, YuNet face model | `%LOCALAPPDATA%\AIVideoStudio\models\` |
+| Whisper models | `%LOCALAPPDATA%\AIVideoStudio\models\whisper\` |
+| YuNet face model | bundled in the program; when running from source, `%LOCALAPPDATA%\AIVideoStudio\models\` |
+| Temporary files (previews, partial exports) | `%LOCALAPPDATA%\AIVideoStudio\temp\`, cleaned up after each job |
+| Exported videos | the folder you choose (default next to the source video); source videos are never overwritten |
+| Program files (installer) | `%LOCALAPPDATA%\Programs\AI Video Studio` (or the folder you chose); no user data is stored there |
 | Tracking results, reframe settings | in the project file |
 | Caption presets | in `studio.db` |
 | API keys | environment variables or Windows Credential Manager (never in files or logs) |
 
-Set `AVS_DATA_DIR` to use another data folder, for example for a portable install. Source videos
-are never modified.
+Set `AVS_DATA_DIR` to use another data folder. In the portable ZIP, a `portable.txt` file next to
+the EXE moves all of the above (except projects and exports) into `UserData\` beside the program.
+Upgrades and uninstalls do not touch this data unless you choose to delete it. Source videos are
+never modified.
 
 ## Documentation
 

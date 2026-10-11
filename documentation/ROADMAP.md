@@ -189,6 +189,47 @@ Still unverified (Phase 3 upgrade):
 - Everything listed as unverified for Phase 3 above (real footage in general, NVENC, desktop
   screens).
 
+## Windows packaging (v0.3.2, done ahead of Phase 9)
+
+Built before Phases 4–8 so the app can be used without Python. The Phase 4–8 features are not
+started.
+
+**Decisions**
+- **PyInstaller, one-folder.** Chosen over:
+  - one-file, which would unpack about 600 MB to a temporary folder on every start, is slow, and is
+    often flagged by antivirus software;
+  - Nuitka, which is slower to build and has less tested support for PySide6, CTranslate2 and
+    onnxruntime.
+
+  Two EXEs share one folder: windowed and console.
+- **Inno Setup 6, per-user by default.** No admin rights and a fixed AppId, so upgrades work.
+  `_internal` is replaced on upgrade. User data is outside the program folder and is kept on
+  uninstall unless the user agrees to delete it.
+- **Portable ZIP** of the same folder, with an opt-in `portable.txt` for data next to the EXE.
+- **FFmpeg bundled** (Gyan 7.1.1 essentials, GPL v3, pinned SHA-256) as separate executables, so
+  the GPL program is not linked into the app, with licence, source information and a
+  user-selectable replacement.
+- **Whisper models not bundled.** They are downloaded on request with consent, verification and
+  resume. YuNet (230 KB) is bundled.
+- **CPU build by default.** CUDA libraries are only in the experimental `--gpu` build. No driver is
+  ever bundled.
+- **Locked dependencies** for the build (`constraints.txt`, resolved for win_amd64 / Python 3.12).
+
+**Verified on `windows-latest`** (Windows Server 2025, no GPU; commit 8150579, v0.3.1 build):
+every packaged-app check in the README table passed.
+- Sizes: program folder 677 MB, 516 files; ZIP 248 MB; installer 179 MB.
+
+**Still to verify on the user's PC:**
+- the installer UI and SmartScreen;
+- display on a real screen;
+- GPU transcription and NVENC on the RTX 4070;
+- performance.
+
+**Still open for Phase 9:**
+- code signing (removes the SmartScreen warning);
+- an update notification;
+- a tested GPU build.
+
 ## Remaining phases
 
 Next phase (not started): **Phase 4, silence removal and manual cutting.**
@@ -204,8 +245,8 @@ Next phase (not started): **Phase 4, silence removal and manual cutting.**
    bad-request errors never fall back), retries with backoff, rate limits, usage display.
 8. **Hardware**: `ffmpeg -encoders` plus a 1-frame NVENC test encode, CUDA checks, CPU fallback,
    resource monitor, temp cleanup, benchmarks.
-9. **Release**: PyInstaller spec, build script and log, launch check of the built exe,
-   troubleshooting docs.
+9. **Release**: packaging is done (see above). Remaining: code signing, update notification,
+   tested GPU build, release notes per version.
 
 ## Risks
 

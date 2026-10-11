@@ -136,3 +136,24 @@ media entry in later phases, with a version bump.
 `%LOCALAPPDATA%\AIVideoStudio\logs\ai_video_studio.log` holds one JSON object per line with
 time, level, logger, message and context fields. Values whose keys look like secrets
 (`api_key`, `token`, ...) and strings that look like OpenAI/Google keys are replaced with `***`.
+
+## Packaged application (Windows)
+
+- `packaging/windows/ai_video_studio.spec` builds two EXEs that share one `_internal` folder.
+  `packaging/windows/launcher.py` calls `ai_video_studio.__main__._run`, so the source and packaged
+  apps start up the same way.
+- `core/paths.py`:
+  - `is_frozen()`, `exe_dir()` (folder of the EXE), `app_root()` (`_internal` when frozen, for
+    bundled resources);
+  - `data_dir()`: `AVS_DATA_DIR`, then `portable.txt` → `<exe>/UserData`, then
+    `%LOCALAPPDATA%\AIVideoStudio`. User data is never written to the program folder.
+- `core/ffmpeg_tools.find_tool`: the Settings folder, then `exe_dir()/bin`, `app_root()/bin`, then
+  `PATH`.
+- `core/download.py`: a stdlib downloader with `.part` files, Range resume, retries and size,
+  SHA-256 and git-sha1 checks.
+- `captions/models.py`: the Whisper model catalogue, status, downloads and removal, under
+  `models_dir()/whisper`. Downloads run as the `model_download` job and never start without user
+  confirmation.
+- `tools/self_test.py` (`--self-test`) runs the real pipeline inside the installed program and
+  writes a JSON report. The Windows build workflow and `packaging/windows/test_packaged.ps1`
+  require its checks to pass.

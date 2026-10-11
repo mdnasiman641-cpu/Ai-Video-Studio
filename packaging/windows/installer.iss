@@ -1,6 +1,6 @@
 ; Inno Setup 6 script for AI Video Studio.
 ; Built by packaging/build.py, which passes AppVersion, SourceDir, OutputDir and IconFile:
-;   iscc /DAppVersion=0.3.1 /DSourceDir=dist\AI-Video-Studio /DOutputDir=dist /DIconFile=build\assets\app.ico installer.iss
+;   iscc /DAppVersion=0.3.2 /DSourceDir=dist\AI-Video-Studio /DOutputDir=dist /DIconFile=build\assets\app.ico installer.iss
 ;
 ; - Installs per user (no administrator rights) by default; "Install for all users" is offered.
 ; - Upgrades in place (same AppId); the old program files are replaced, user data is not touched.

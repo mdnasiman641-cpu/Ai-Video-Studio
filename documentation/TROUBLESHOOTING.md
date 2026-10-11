@@ -1,6 +1,39 @@
 # Troubleshooting
 
+## The app does not start
+1. Start **AI Video Studio Tools → AI Video Studio (diagnostic console)** from the Start Menu, or run
+   `AI-Video-Studio-Console.exe` from the program folder. It shows the log in a console window and
+   any Python error.
+2. Read `%LOCALAPPDATA%\AIVideoStudio\startup_error.log` (written when the program cannot even load
+   its modules, also in the windowed EXE and in portable mode) and the main log
+   `%LOCALAPPDATA%\AIVideoStudio\logs\ai_video_studio.log`, where errors after start-up are recorded
+   (in the portable version with `portable.txt`: `UserData\logs\` next to the EXE).
+3. Run **Check AI Video Studio environment** (`AI-Video-Studio-Console.exe --check-env --pause`) and
+   **AI Video Studio self-test** (`--self-test --pause`). The self-test imports a generated video,
+   plays it, exports captions and a reframed clip, and reports each step.
+4. Common causes:
+   - **Files missing or blocked by antivirus.** The `_internal` folder must be next to the EXE. If an
+     antivirus program quarantined a file, restore it or reinstall. Do not copy only the EXE out of
+     the program folder; use the whole folder (or the installer).
+   - **ZIP not fully extracted.** Running the EXE from inside the ZIP in Explorer does not work;
+     extract all files first.
+   - **"Windows protected your PC" (SmartScreen).** The program is not code-signed. Click
+     **More info → Run anyway** after checking the download against `SHA256SUMS.txt`.
+   - **32-bit Windows or Windows 7/8.** Not supported; Windows 10/11 64-bit is required.
+   - **Unwritable data folder.** The app needs to write to `%LOCALAPPDATA%\AIVideoStudio` (or
+     `UserData\` in portable mode). For the portable version on a read-only drive, remove
+     `portable.txt`.
+
+## Installing, upgrading and uninstalling
+- The installer installs per user by default and needs no admin rights. Upgrading: run the new
+  setup EXE over the old installation; settings, models and projects are kept.
+- After an uninstall, your settings, logs and models stay in `%LOCALAPPDATA%\AIVideoStudio` unless
+  you answered **Yes** to the uninstaller's question. Delete that folder by hand to remove them later.
+  Projects in `Documents\AI Video Studio Projects` and exported videos are never removed.
+
 ## "FFmpeg: NOT FOUND" in the status bar
+The installer and portable ZIP include FFmpeg in the `bin` folder next to `AI-Video-Studio.exe`. If
+that folder was removed (or blocked by antivirus software), reinstall, or use one of the options below.
 Install FFmpeg (`winget install Gyan.FFmpeg`) and restart the app, or open **Settings → FFmpeg
 folder**, choose the folder that contains `ffmpeg.exe` and `ffprobe.exe`, then click
 **Detect FFmpeg**. You can also put both executables in a `bin\` folder next to the app.
@@ -64,15 +97,24 @@ when reporting a problem. API keys are masked in the log.
 Close the app and delete `%LOCALAPPDATA%\AIVideoStudio\studio.db` (settings, recent list, job
 history). Project files are not affected.
 
-## Caption generation fails with "Could not download the Whisper model"
-The model is downloaded from huggingface.co on first use. Check the internet connection, firewall
-or proxy. To work offline, download a faster-whisper (CTranslate2) model folder, for example
-`Systran/faster-whisper-small`, and choose it under **Settings → Captions → Local model folder**.
+## A Whisper model does not download
+Models are downloaded from huggingface.co only after you confirm (Generate Captions, or **Settings →
+Speech recognition models → Download**). Check the internet connection, firewall or proxy (the
+`HTTPS_PROXY` environment variable is used). An interrupted download resumes where it stopped
+when you try again. "Not enough free disk space" means the drive holding
+`%LOCALAPPDATA%\AIVideoStudio\models` needs more room. "Checksum does not match" means a file
+arrived damaged; it was deleted and will be downloaded again.
+
+To work offline, copy a model folder from another PC into `%LOCALAPPDATA%\AIVideoStudio\models\whisper\`,
+or download a faster-whisper (CTranslate2) model folder, for example `Systran/faster-whisper-small`,
+and choose it under **Settings → Captions → Local model folder**.
 
 ## Captions are generated on the CPU although I have an NVIDIA GPU
 The status line after generation shows the device and the reason for any fallback. GPU
-transcription needs the CUDA 12 cuBLAS and cuDNN 9 libraries: run `scripts\windows\setup.bat --gpu`
-(installs them as pip packages) and keep the NVIDIA driver up to date. `check_env.bat` shows how
+transcription needs the CUDA 12 cuBLAS and cuDNN 9 libraries. The standard installer is a CPU
+build and does not include them. From source, run `scripts\windows\setup.bat --gpu` (installs them
+as pip packages); for the packaged app, build it with `python packaging\build.py --gpu`
+(experimental, not yet tested on a GPU). Keep the NVIDIA driver up to date. `check_env.bat` shows how
 many CUDA devices CTranslate2 can see.
 
 ## Bengali (or another script) looks wrong in the preview or export
