@@ -13,7 +13,7 @@ app as "planned" and are not presented as working.
 | 0 | Repository audit and plan | Done ([documentation/ROADMAP.md](documentation/ROADMAP.md)) |
 | 1 | Foundation: UI shell, import, metadata, preview, projects, SQLite, jobs, settings, logging | **Done** |
 | 2 | Caption generation, editing, styling, SRT, burn-in, optional AI correction | **Done**: implemented and tested; see [Verification status](#verification-status) for what is and is not verified (Bengali quality, GPU, real AI providers) |
-| 3 | Face/person tracking and AI auto reframe | **Done**: implemented and tested with real FFmpeg and real OpenCV detection; GPU/NVENC and your own footage not yet verified (see [Verification status](#verification-status)) |
+| 3 | Face/person tracking and AI auto reframe, with six tracking modes including active-speaker (v0.3.1) | **Done**: implemented and tested with real FFmpeg, real OpenCV detection and the real speech detector on generated test clips; GPU/NVENC, your own footage and real conversations not yet verified (see [Verification status](#verification-status)) |
 | 4 | Silence removal and manual cutting | Planned |
 | 5 | Resize and visual editing | Planned |
 | 6 | Bulk editing and batch export | Planned |
@@ -91,7 +91,57 @@ app as "planned" and are not presented as working.
 
 ### What works now (Phase 3: AI auto reframe)
 
-Open the **Auto Reframe** page, pick a video and click **Analyse Video**.
+Open the **Auto Reframe** page, pick a video, choose a **tracking mode** and click **Analyse Video**.
+
+#### Tracking modes
+
+Choose the default in **Settings → Tracking**; each video keeps its own mode, which you can change
+on the Auto Reframe page at any time.
+
+| Mode | What it follows | Needs |
+|------|-----------------|-------|
+| **Auto Face Tracking** (default) | One face: the best one on screen (by screen time and detection reliability, not size), or the one you choose. It does not switch because another face is bigger. | Faces |
+| **Face + Speech Audio (Active Speaker)** | The visible person whose mouth movement matches the speech in the audio. Switches only after the evidence has lasted for the confirmation time (default 1 s). During silence nobody is switched. When speech cannot be matched to anyone visible (off-screen voice, overlapping speech) it keeps the last speaker for a while (default 3 s), then uses the fallback. | Faces, mouth movement (15 frames/s), speech |
+| **Speech-Audio-Driven** | Speech timing from the audio: the framing changes only while someone speaks and holds still during silence. Audio cannot tell *which* visible person speaks, so it follows a person only when exactly one is visible; with several it does not guess and uses the fallback (or keeps the previous person if the fallback is "hold"). | Speech (faces optional) |
+| **Manual Subject Tracking** | Exactly the subject you choose, with optional changes from the playhead. Nothing automatic. | Faces (and bodies, if enabled) |
+| **Automatic Visible Subject** | The best visible face or body; moves to the next best when the subject is gone longer than the hold time. (This is how v0.3.0's "track" mode behaved.) | Faces (and bodies, if enabled) |
+| **Center Crop** | A fixed crop, positioned with the offsets. | Nothing |
+
+- **Fallback** when nobody can be followed: return to the centre (default), hold the last framing,
+  or frame everyone visible.
+- **Cost**: Active Speaker analyses 15 frames per second plus the audio. Here, on a cloud CPU, a
+  720p clip took about a third of its duration (a 10-minute video ≈ 3–4 minutes). Face-only modes
+  analyse 5 frames per second and are several times faster. Not measured on your PC.
+- **Options per mode**: tracking confidence threshold, speech threshold, speaker-switch
+  confirmation, how long to keep the last speaker, subject-lost hold, camera smoothing, crop
+  padding, maximum upscale, analysis rate. Only the options the selected mode uses are shown.
+- **Reanalysis**: each analysis records what it contains (faces, bodies, mouth movement, speech).
+  When the selected mode needs something the stored analysis lacks, the page says **Reanalysis
+  required** and does not use those results; it never silently uses results made for another
+  mode. Stored results are kept until you analyse again, so switching back works immediately.
+- **Status at the playhead**: mode, followed subject, faces detected, speech yes/no with the
+  voice-activity value, speaker evidence score (Active Speaker), tracking state, crop size and
+  upscale factor. All values come from the stored analysis; nothing is estimated for display.
+
+#### How the active-speaker estimate works
+
+There is no trained active-speaker model in the app. It combines two measured signals:
+
+1. **Speech activity**: the Silero voice-activity detector that ships with faster-whisper gives a
+   speech probability for every 32 ms of audio, plus a loudness envelope. This says *that* someone
+   speaks, not *who*.
+2. **Mouth movement**: for each face, YuNet's mouth-corner landmarks locate the mouth region. Its
+   frame-to-frame change is measured 15 times per second, minus the change of the eye region (so
+   head movement and lighting changes are not counted as talking).
+
+For each face and moment (a 1.2 s window), the **speaker evidence score** (0–1) is the average of:
+- how much the mouth moves during speech compared with silence;
+- how well the mouth movement follows the rhythm of the speech loudness (correlation).
+
+A face is named the speaker only when speech is present, its score is at least 0.35 and clearly
+higher than every other face. The score is a heuristic measure, not a probability. Chewing,
+laughing or mouthing along to music can also move a mouth, and silent dubbing or bad audio sync
+will defeat it.
 
 - **Detection** (OpenCV, runs on the CPU):
   - Faces: the **YuNet** DNN face detector. Its 230 KB model is downloaded automatically on the
@@ -104,13 +154,15 @@ Open the **Auto Reframe** page, pick a video and click **Analyse Video**.
     this should be much faster than real time (measured here: 30 frames in under 1 s on a
     cloud CPU); it has **not been measured on your PC**.
 - **Tracking**: every subject gets a stable ID (#1, #2, …) with a confidence value. Boxes are
-  matched by overlap and predicted motion, so two people next to each other keep their IDs. Short
-  gaps (occlusion, a missed detection) keep the ID. One-frame false detections are dropped.
-- **Subject selection**: *Automatic* follows the best visible subject (faces preferred, then
-  size, confidence and screen time). You can pick a subject to follow **from the start**, or switch
-  to another subject **from the playhead**. Double-click a subject to jump to where it appears.
-  When the followed person disappears and one new track appears near the same place within 3 s,
-  it is treated as the same person. With two candidates it does not guess.
+  matched by overlap and predicted motion, so two people next to each other keep their IDs. A
+  match is refused when the box size jumps (a face close to the camera is not the small face behind
+  it) or the colours of face and clothes clearly differ. One-frame false detections are dropped.
+- **Occlusion recovery**: after the whole video is analysed, track pieces are joined when one
+  starts within 6 s after another ended, near where it was last seen, at a similar size and with
+  similar colours, and only when no other track fits about as well. So someone hidden by a passer-by
+  keeps their ID; when two people could be the one who returned, nothing is guessed.
+- **Subject selection** (subject modes): pick a subject to follow **from the start**, or switch to
+  another subject **from the playhead**. Double-click a subject to jump to where it appears.
 - **Formats**: original aspect ratio, 16:9, 9:16 (Reels, Shorts, TikTok), 1:1 and 4:5, with output
   sizes such as 1080×1920, 720×1280, 1080×1080, 1080×1350 and 1920×1080. The crop always has the
   target aspect ratio (no stretching) and stays inside the frame.
@@ -119,12 +171,19 @@ Open the **Auto Reframe** page, pick a video and click **Analyse Video**.
   subject is lost (then an eased return to the centre), and eased transitions when the subject
   changes or reappears. The face is always kept inside the crop, even if that means moving faster
   than the speed limit.
-- **Manual framing**: zoom, padding around the face, subject height in the frame, horizontal and
-  vertical offset, and **Reset to Automatic Framing**. **Center crop (no tracking)** is a separate,
-  explicit mode.
-- **Caption-safe framing**: reserve the bottom or top part of the output for captions; the face is
-  kept out of that area where the crop allows it. Captions can be burned in. Caption text, timing,
-  style and SRT files are not changed.
+- **Framing**: the face and the start of the upper body (chin and neck) are kept inside the crop
+  with the chosen padding; the face sits at the chosen height (default 38 % from the top).
+- **Maximum upscale** (default 2.0×): zoom is limited so the crop is never enlarged more than this.
+  When even the full crop exceeds it (for example 9:16 at 1080×1920 from a 720p source), a warning
+  names a smaller output size that stays within the limit.
+- **Manual framing**: zoom, subject height in the frame, horizontal and vertical offset, and
+  **Reset to Automatic Framing**.
+- **Caption-safe framing**: by default the caption area is worked out from the video's caption style
+  (position, margin, font size and number of lines), so the area the face is kept out of is where
+  the captions really are; you can also set a bottom/top area by hand or turn it off. This is a
+  preference applied before smoothing, so it never makes the camera jump. When the crop cannot move
+  far enough (a 9:16 crop of a landscape video uses the full height), a warning says how often the
+  face overlaps the captions. Caption text, timing, style and SRT files are not changed.
 - **Preview**: the source video with the crop rectangle, the detected boxes and IDs (the followed
   subject in green) and the caption area; next to it the reframed output with captions, drawn from
   the frame already decoded by the player. **Exact Frame Preview** renders the current frame with
@@ -138,8 +197,9 @@ Open the **Auto Reframe** page, pick a video and click **Analyse Video**.
 - **Warnings instead of silent bad results**: no faces/people found, subject visible in under half
   the video, low confidence, decoding stopped early (damaged file), video changed since analysis,
   Haar fallback in use. Exporting with an open warning asks for confirmation first.
-- Tracking results and settings are saved in the project (format version 3; version 1 and 2 files
-  still open), so reopening a project does not re-analyse.
+- Tracking results, the tracking mode and settings are saved in the project (format version 4;
+  version 1–3 files still open, and v0.3.0 settings are converted), so reopening a project does not
+  re-analyse.
 
 ### Verify an exported reframed video
 
@@ -163,9 +223,18 @@ Open the **Auto Reframe** page, pick a video and click **Analyse Video**.
 - **Full-body detection (HOG)** is basic: upright, mostly full people at least about a quarter of
   the frame height. Seated, cropped or small people are often missed. Its accuracy has not been
   measured on real footage.
-- **Identity is position-based.** There is no face recognition: after someone leaves and comes
-  back, they get a new ID unless they reappear near the same place within 3 seconds. Use
-  **Follow From Playhead** to pick them again.
+- **Identity uses position, size and colours, not face recognition.** Someone who leaves and comes
+  back more than 6 s later, or far from where they left, gets a new ID; use **Follow From Playhead**
+  to pick them again. Two people dressed alike who swap places while hidden can still be confused.
+- **Active Speaker** is a hand-built audio-visual measure, not a trained model:
+  - It needs visible, roughly frontal mouths. YuNet is required; the Haar fallback has no landmarks.
+  - Side views, beards or masks covering the mouth, small faces, or low frame rates weaken it.
+  - Off-screen voices and overlapping speech are reported as uncertain rather than assigned.
+  - Music with singing can count as speech for the voice-activity detector.
+  - It has **not been validated on real conversations**; only on generated clips (see the
+    verification table).
+- **Speech-Audio-Driven** cannot identify a speaker among several visible people (by design it
+  does not guess).
 - **Fast motion** between analysed frames is interpolated; raise the analysis rate for sports or
   quick movement.
 - The crop has a fixed size per export (no automatic zoom). A 9:16 crop of a 1080p video is
@@ -200,6 +269,10 @@ GitHub's runners have **no NVIDIA GPU**, and nothing has been tested on a Window
 | NVIDIA CUDA transcription, NVENC encoding | Detection logic + CPU fallback only | **Not verified** (no GPU available); NVENC is listed in FFmpeg but the test encode correctly fails on the runners |
 | Cut sync (`remap_to_cuts`) | Unit tests | Passed; no cutting UI until Phase 4 |
 | **Phase 3 crop maths** (all presets, bounds, smoothing, dead zone, speed limit, loss/hold, subject changes, reappearance, caption-safe area) | Unit tests on synthetic tracks | Passed |
+| **Tracking modes** (each mode, fallbacks, reanalysis, settings persistence, upscale limit, caption band from style, preview = export crop at every frame) | Unit tests with **synthetic** tracks, mouth series and speech data; GUI tests | Passed locally (Linux); CI result in the commit's run |
+| Active-speaker scenarios (one speaks / one listens, speaker change, silent foreground person crossing, off-screen narration, silence and music, overlapping speech, occlusion) | Unit tests on **synthetic** data with known ground truth | Passed locally |
+| **Active speaker, real pipeline** | Generated clips: real face photo with a mouth opened in time with real recorded speech, real YuNet + mouth measure + Silero VAD through the analysis job | Passed locally: speaker A then B followed correctly (evidence 0.85 / 0.82 vs ≤0.14), silence held, off-screen voice not attributed, steady tone not speech. **Not validated on real conversations** |
+| Speech activity (Silero VAD) and audio/video alignment | Real VAD on the speech fixture, silence and a tone; audio stream starting 2 s late | Passed locally: speech found at the right times, tone ignored, late audio aligned |
 | Tracker IDs (two people crossing, occlusion, false positives, fast motion) | Unit tests on synthetic detections | Passed |
 | **Real face detection** (YuNet, Haar fallback) | Public-domain NASA photo moving through a generated video; one and two faces | Passed on Linux in this environment (YuNet: face in 30 of 30 frames, confidence 0.93; two people kept apart). CI runs it on Windows and Linux |
 | HOG person detection | Runs in the pipeline; no test footage of full-body people | **Accuracy not measured** |
@@ -208,6 +281,7 @@ GitHub's runners have **no NVIDIA GPU**, and nothing has been tested on a Window
 | Auto Reframe page | GUI tests (offscreen) | Passed; **not checked by eye on a real screen** |
 | Detection speed on your Ryzen 7 7700, real talking-head footage | — | **Not measured / not tested** |
 | GPU for detection | — | Not used: pip OpenCV has no CUDA. Detection is CPU-only by design |
+| GPU for speech activity | — | Not used: Silero VAD runs on the CPU (onnxruntime CPU provider) |
 
 ### Bengali: synthetic tests vs real speech
 
@@ -253,6 +327,8 @@ your own videos. GPU inference was not tested and should give the same text, onl
   not produce Bengali text in tests, and even the large models need proofreading (see above).
 - Optional GPU transcription: `scripts\windows\setup.bat --gpu` installs the CUDA 12 cuBLAS and
   cuDNN 9 runtime wheels. Not yet verified on real NVIDIA hardware.
+- Speech activity for the Active Speaker and Speech-Audio modes uses the Silero VAD model that is
+  already installed with faster-whisper (no extra package or download).
 - Auto reframe uses `opencv-python-headless` (installed by `setup.bat`). The first analysis downloads
   the YuNet face model (230 KB) from the OpenCV model zoo on GitHub; without internet the less
   accurate Haar cascade is used. Do not install the non-headless `opencv-python` package in the

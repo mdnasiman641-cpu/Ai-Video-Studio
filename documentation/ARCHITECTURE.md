@@ -78,6 +78,15 @@ Export (job reframe_export; payload = crop keyframes + output size + ASS text sn
       └─ jobs.encode.encode_with_fallback (NVENC after test encode, else libx264; .part → rename)
 ```
 
+Analysis features follow the tracking mode (`ReframeSettings.analysis_features()`):
+`faces`/`persons` → detector + tracker (with size/appearance gates and offline re-linking,
+`reframe/tracker.py`), `mouth` → `reframe/mouth.py` (YuNet landmarks, 15 frames/s), `speech` →
+`reframe/speech.py` (FFmpeg audio aligned with `aresample=first_pts=0`, Silero VAD bundled in
+faster-whisper, 30 s chunks). `reframe/speaker.py` turns mouth movement + speech into per-moment
+speaker evidence, and `framing._Resolver` decides whom to follow per mode (with confirmation,
+hold and fallback) before the shared smoothing/camera stage. `model.reanalysis_reasons()` refuses
+analyses that lack what the mode needs.
+
 The Auto Reframe page draws both previews from the frame the player has already decoded; the
 **Exact Frame Preview** job renders one frame through the same FFmpeg filters as the export.
 

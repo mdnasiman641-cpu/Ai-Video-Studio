@@ -35,6 +35,22 @@ wrong and click **Follow From Playhead**. If the person is lost often (turned aw
 raise **Analyse** (frames per second), turn on full-body detection, or increase **Hold when lost**.
 If nobody can be tracked, choose **Center crop (no tracking)** and position it with the offsets.
 
+## Auto Reframe says "Reanalysis required"
+The selected tracking mode needs data the stored analysis does not have, for example Active
+Speaker needs mouth movement and speech. Click **Analyse Video**. The old results are kept and
+are used again if you switch back to a mode they support.
+
+## Active Speaker follows the wrong person or nobody
+- Check the **speaker evidence** in the status line while scrubbing. Low values on everyone mean
+  the mouths are not visible enough (side views, small faces, masks), the voice is off-screen, or
+  two people talk at once. In all these cases the mode deliberately does not guess.
+- Raise **Mouth analysis rate** for fast speech, lower **Speaker switch after** for quicker cuts,
+  or raise it to avoid cuts on short interjections.
+- If the audio is out of sync with the video in the source file itself, mouth movement and speech
+  cannot be matched.
+- For interviews where you know who speaks when, **Manual Subject Tracking** with **Follow From
+  Playhead** gives exact control.
+
 ## "OpenCV is not installed"
 Run `scripts\windows\setup.bat` again (or `pip install -r requirements.txt`). If both
 `opencv-python` and `opencv-python-headless` are installed, uninstall both and reinstall only the

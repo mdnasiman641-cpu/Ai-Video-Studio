@@ -2,7 +2,73 @@
 
 All notable changes are listed here. Versions follow semantic versioning.
 
-## [0.3.0] - Unreleased
+## [0.3.1] - Unreleased
+
+Phase 3 upgrade: selectable tracking modes, active-speaker framing and tracking fixes.
+
+### Added
+- **Tracking modes**, selectable in Settings → Tracking (default for new videos, kept after restart)
+  and per video on the Auto Reframe page (saved in the project):
+  - Auto Face Tracking
+  - Face + Speech Audio (Active Speaker)
+  - Speech-Audio-Driven
+  - Manual Subject Tracking
+  - Automatic Visible Subject
+  - Center Crop
+
+  Each mode shows only the options it uses.
+- **Active speaker**: mouth-region movement per face (from YuNet mouth landmarks, compensated for
+  head movement) is matched with speech activity and loudness from the audio. The followed speaker
+  changes only after the evidence lasts for the confirmation time. Silence never causes a switch,
+  and off-screen or overlapping speech is treated as uncertain.
+- **Speech activity** with the Silero VAD bundled in faster-whisper (CPU, offline, no new
+  dependency). Audio is aligned to the video's time zero, even when the audio stream starts late.
+- **Fallback** options (centre, hold, frame everyone visible), a maximum upscale factor, a tracking
+  confidence threshold, a speech threshold, the speaker-switch confirmation time and a speaker
+  hold time.
+- **Reanalysis detection**: analyses record what they contain. A mode that needs more shows
+  "Reanalysis required" and never uses the stored results; those results are kept for the modes
+  that can use them.
+- **Status at the playhead**: mode, subject, detections, speech, speaker evidence, state, crop
+  size and upscale factor.
+- Tests:
+  - every mode and the active-speaker scenarios, on synthetic data
+  - real VAD and audio alignment
+  - real detector + VAD on generated audio-visual clips (CI)
+  - Settings persistence across a restart, the mode in saved projects, and the reanalysis banner
+
+### Fixed (root causes found in the v0.3.0 implementation)
+- **Low "coverage" and "unreliable tracking" warnings for subjects who are simply not in every
+  part of the video**: coverage was measured against the whole video. Reliability is now the
+  detection rate *while on screen*; partial presence is a note, not a warning.
+- **One person split into several IDs after an occlusion**: tracks closed after 1.5 s without a
+  detection and were never re-linked. Track pieces are now joined offline when position, size and
+  colours agree and the choice is unambiguous.
+- **Crop jumping to an unintended foreground person**: the automatic choice was dominated by face
+  size, so a large face near the camera won, and size changes were not checked when matching
+  detections. The choice now uses screen time and detection reliability. Matches are refused on
+  large size jumps or clearly different colours.
+- **Excessive upscaling**: zoom had no limit. A maximum upscale now limits it, with a warning when
+  the source is too small for the output.
+- **Caption-safe framing conflicts**: the caption area was a fixed 25 % unrelated to the real
+  captions, and it was enforced as a hard clamp after smoothing, which caused jumps. It is now
+  derived from the caption style and applied as a smoothed preference, with a warning when the
+  crop cannot avoid the captions.
+- **Framing**: the protected area includes the chin and neck (start of the upper body). The
+  default face height is 38 %.
+- **Intermittent crash at exit** (`Fatal Python error: Aborted` on Windows CI since v0.2.1;
+  segmentation fault on Linux): a core dump showed PySide destroying left-over Qt objects at
+  interpreter exit (`QObject::~QObject` in `destroyQCoreApplication`). The window's job bridge and
+  project controller had no Qt parent. They are now owned by the window, the app destroys the window
+  before shutdown, and the bridge stops receiving job events when it is destroyed. Linux full test
+  runs went from 5 of 6 crashing to 8 of 8 clean.
+
+### Changed
+- Project format version 4: the tracking mode replaces v0.3.0's track/center setting, which is
+  converted when older projects are opened.
+- The Haar fallback keeps its own detection gate (its score is not comparable with YuNet's).
+
+## [0.3.0]
 
 Phase 3: face/person tracking and AI auto reframe.
 

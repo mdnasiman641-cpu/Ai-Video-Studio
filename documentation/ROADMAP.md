@@ -84,10 +84,14 @@ Still unverified:
   combination the app uses (Qt Multimedia, PyAV, CTranslate2, full faster-whisper transcription),
   and none aborted. The cause is not identified; so far it has only appeared at the end of the full
   pytest run. As a precaution, the app releases the Whisper model before interpreter shutdown.
-  Update (Phase 3 work): it also happens on Linux. On commit 3590586 (before Phase 3), the full
-  test run crashed with a segmentation fault at exit, after all tests passed, in 2 of 10 runs in a
-  Linux container (no Python frame in the dump). With Phase 3 it occurred in 1 of 8 runs. The cause
-  is still not identified.
+  **Resolved in v0.3.1** (root cause found with a core dump on Linux, where the same crash
+  reproduced in up to 5 of 6 full runs): the crash was in `QObject::~QObject` inside
+  `PySide::destroyQCoreApplication`, i.e. PySide destroying left-over Qt objects in arbitrary
+  order at interpreter exit. The left-overs were the main window's parentless `JobBridge` and
+  `ProjectController` (one pair per window; also present in the app) and a dialog a test created
+  without a parent. They are now parented to the window, the app destroys its window before
+  shutting down, and GUI tests process deferred deletions. After the fix: 8 of 8 full runs exited
+  cleanly on Linux. Windows CI is the remaining check.
 
 ## Phase 3: face tracking and auto reframe (v0.3.0)
 
@@ -132,6 +136,58 @@ Still unverified (Phase 3):
   `player.stop()` (via the `LoadedMedia` signal). This could deadlock Qt's FFmpeg backend when a
   clip was loaded or unloaded; it hung the GUI tests intermittently. The call is now deferred to
   the event loop.
+
+## Phase 3 upgrade (v0.3.1): tracking modes and active speaker
+
+Root causes of the problems seen on the user's Windows test were reproduced with controlled
+inputs on the v0.3.0 code before anything was changed:
+- **"Detected in only X %" / "unreliable"**: coverage was samples ÷ all analysed frames, so a
+  person on screen for 40 % of the video, detected in every one of those frames, was reported as
+  40 % and "unreliable".
+- **Low coverage and lost subjects after occlusion**: a gap of more than 1.5 s closed the track,
+  and the new piece got a new ID (2.4 s occlusion → two IDs). Nothing re-linked them.
+- **Unintended foreground person**: the automatic score was coverage × confidence × √area. A large
+  face near the camera ranked first and was taken over when the subject was lost. Matching
+  checked position only (no size or appearance check).
+- **Too tight / upscaled**: zoom had no upscale limit (2.67× at zoom 1.5 for 9:16 at 1080×1920).
+- **Caption conflicts**: a fixed 25 % band unrelated to the caption style, enforced as a hard
+  clamp after smoothing (jumps). A 9:16 crop of a landscape video cannot move vertically at all.
+
+Fixes: detection rate while on screen; size and appearance gates; offline re-linking of track
+pieces (unambiguous only); an automatic choice based on screen time and reliability; a maximum
+upscale; a caption band derived from the caption style and applied before smoothing.
+
+Tracking modes: Auto Face, Active Speaker (face + speech audio), Speech-Audio-Driven, Manual,
+Automatic Visible Subject, Center Crop. The Settings default persists across restarts, and the
+mode chosen per video is saved in the project (format 4).
+
+Active speaker method (dependency evaluation):
+- **Chosen:** Silero VAD (already installed with faster-whisper; onnxruntime CPU; no download) for
+  speech activity, plus a measured mouth-region motion signal from YuNet landmarks, matched with
+  the speech loudness. No new packages and fully offline.
+- **Not chosen:**
+  - Trained active-speaker models (TalkNet, Light-ASD, LoCoNet): they need PyTorch (about 2 GB for
+    CUDA builds), model weights from research repositories and per-face audio-visual crops; there
+    is no maintained Windows/ONNX package.
+  - MediaPipe Face Mesh for lip landmarks: the same objections as in Phase 3.
+
+  Either can be revisited if measurements on real footage show the heuristic is not good enough.
+- **Speaker diarisation** (pyannote): needs PyTorch and a Hugging Face token, and would still not
+  say which *visible* person speaks.
+
+Verified:
+- Synthetic unit scenarios for every mode.
+- Real VAD on recorded speech, silence and a tone, and audio that starts 2 s late.
+- Generated audio-visual clips through the real pipeline: speaker A, then B, correctly followed;
+  silence held; off-screen voice not attributed.
+
+Still unverified (Phase 3 upgrade):
+- **Active speaker on real conversations** (podcasts, interviews, several people), including
+  side views, masks or beards, and music with singing.
+- **Analysis speed on the user's PC.** Measured here: Active Speaker analysis takes about a third
+  of the clip's duration for 720p on a cloud CPU.
+- Everything listed as unverified for Phase 3 above (real footage in general, NVENC, desktop
+  screens).
 
 ## Remaining phases
 

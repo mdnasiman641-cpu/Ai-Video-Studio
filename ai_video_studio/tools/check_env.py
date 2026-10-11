@@ -68,6 +68,15 @@ def main() -> int:
         _line(None, "YuNet face model", str(model) if model.is_file()
               else "not downloaded yet (downloaded automatically on the first analysis)")
 
+    try:
+        from ai_video_studio.reframe.speech import silero_vad
+
+        _vad, name = silero_vad()
+        _line(True, "Speech activity (Active Speaker / Speech-Audio modes)", name)
+    except Exception as exc:  # noqa: BLE001
+        _line(False, "Speech activity (Active Speaker / Speech-Audio modes)", str(exc))
+        failures += 1
+
     from ai_video_studio.storage import secrets
 
     _line(None, "Secure API-key storage", "available" if secrets.secure_store_available()
