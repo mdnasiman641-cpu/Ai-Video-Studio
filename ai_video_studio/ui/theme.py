@@ -19,6 +19,7 @@ QLabel#SectionTitle {{ font-size: 11pt; font-weight: 600; color: #c9cdd4; }}
 QLabel#Muted {{ color: #8b919c; }}
 QLabel#Error {{ color: #ff6b6b; }}
 QLabel#Ok {{ color: #5fd38d; }}
+QLabel#Warning {{ color: #ffb84d; }}
 QFrame#Card {{
     background-color: #1e2126;
     border: 1px solid #2a2e35;

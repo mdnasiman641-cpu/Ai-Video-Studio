@@ -31,6 +31,7 @@ from ai_video_studio.ui.pages.home import HomePage
 from ai_video_studio.ui.pages.media import MediaPage, video_file_filter
 from ai_video_studio.ui.pages.planned import PlannedPage
 from ai_video_studio.ui.pages.queue import QueuePage
+from ai_video_studio.ui.pages.reframe import ReframePage
 from ai_video_studio.ui.pages.settings_page import SettingsPage
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController
 from ai_video_studio.ui.theme import app_icon, glyph_icon
@@ -43,7 +44,7 @@ NAVIGATION = [
     ("Media", "\u25a4"),           # ▤
     ("Edit", "\u270e"),            # ✎
     ("Captions", "\u2261"),        # ≡
-    ("Face Tracking", "\u25ce"),   # ◎
+    ("Auto Reframe", "\u25ce"),    # ◎ face/person tracking and reframing
     ("Smart Cut", "\u2702"),       # ✂
     ("Resize & Crop", "\u2922"),   # ⤢
     ("Bulk Processing", "\u25a6"), # ▦
@@ -77,6 +78,7 @@ class MainWindow(QMainWindow):
         self.media_page = MediaPage(self.controller)
         self.edit_page = EditPage(self.controller)
         self.captions_page = CaptionsPage(self.controller, self.bridge)
+        self.reframe_page = ReframePage(self.controller, self.bridge)
         self.queue_page = QueuePage(services, self.bridge)
         self.settings_page = SettingsPage(services, on_tools_changed=self._on_tools_changed)
         built = {
@@ -84,6 +86,7 @@ class MainWindow(QMainWindow):
             "Media": self.media_page,
             "Edit": self.edit_page,
             "Captions": self.captions_page,
+            "Auto Reframe": self.reframe_page,
             "Export Queue": self.queue_page,
             "Settings": self.settings_page,
         }
@@ -157,6 +160,8 @@ class MainWindow(QMainWindow):
             self.edit_page.stop_playback()
         if self.pages.currentWidget() is self.captions_page and row != self._page_index["Captions"]:
             self.captions_page.stop_playback()
+        if self.pages.currentWidget() is self.reframe_page and row != self._page_index["Auto Reframe"]:
+            self.reframe_page.stop_playback()
         self.pages.setCurrentIndex(row)
         if row == self._page_index["Home"]:
             self.home_page.refresh_recent()
@@ -243,6 +248,7 @@ class MainWindow(QMainWindow):
         if self.confirm_discard():
             self.edit_page.stop_playback()
             self.captions_page.stop_playback()
+            self.reframe_page.stop_playback()
             self.controller.close_project()
             self.navigate("Home")
 
@@ -309,4 +315,5 @@ class MainWindow(QMainWindow):
             return
         self.edit_page.stop_playback()
         self.captions_page.stop_playback()
+        self.reframe_page.shutdown()
         event.accept()

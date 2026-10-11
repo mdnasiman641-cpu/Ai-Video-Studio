@@ -21,6 +21,9 @@ from ai_video_studio.core.media import MediaItem, MediaStatus, VIDEO_EXTENSIONS,
 from ai_video_studio.jobs.caption_jobs import BURN_IN_JOB, CORRECTION_JOB, FRAME_PREVIEW_JOB, TRANSCRIBE_JOB
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
+from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, REFRAME_EXPORT_JOB, REFRAME_PREVIEW_JOB
+from ai_video_studio.reframe.framing import CropPath, compute_crop_path, resolve_output_size
+from ai_video_studio.reframe.model import ReframeSettings, ReframeState, TrackingAnalysis
 from ai_video_studio.services import Services
 from ai_video_studio.storage.project import Project
 
@@ -70,6 +73,8 @@ class ProjectController(QObject):
     captions_changed = Signal(str)      # media id: caption track or style changed
     transcription_finished = Signal(str, object)  # media id, job (completed or failed)
     corrections_ready = Signal(str)     # media id: AI suggestions are waiting for review
+    reframe_changed = Signal(str)       # media id: reframe settings or tracking results changed
+    reframe_analysis_finished = Signal(str, object)  # media id, job (completed, failed or cancelled)
 
     def __init__(self, services: Services, bridge: JobBridge):
         super().__init__()
@@ -89,6 +94,7 @@ class ProjectController(QObject):
         self.services.recent.touch(project)
         self.probe_pending()
         self._recover_transcriptions()
+        self._recover_reframe_analyses()
         return project
 
     def save_project(self, path: str | Path | None = None) -> Path:
@@ -299,6 +305,9 @@ class ProjectController(QObject):
         if job.kind == CORRECTION_JOB:
             self._on_correction(job)
             return
+        if job.kind == REFRAME_ANALYZE_JOB:
+            self._on_reframe_analysis(job)
+            return
         if job.kind != PROBE_JOB:
             return
         item = self.project.find_media(job.payload.get("media_id", ""))
@@ -335,3 +344,152 @@ class ProjectController(QObject):
         self.project.dirty = True
         self.dirty_changed.emit(True)
         self.corrections_ready.emit(media_id)
+
+    # -- auto reframe ------------------------------------------------------------
+    def reframe_state(self, media_id: str) -> ReframeState:
+        """The video's reframe data (default settings if it has never been reframed)."""
+        item = self.media(media_id)
+        return item.reframe if item.reframe is not None else ReframeState()
+
+    def set_reframe_settings(self, media_id: str, settings: ReframeSettings) -> None:
+        settings.validate()
+        item = self.media(media_id)
+        analysis = item.reframe.analysis if item.reframe else None
+        item.reframe = ReframeState(ReframeSettings.from_dict(settings.to_dict()), analysis)
+        self.project.dirty = True
+        self.reframe_changed.emit(media_id)
+        self.dirty_changed.emit(True)
+
+    @staticmethod
+    def analysis_is_stale(item: MediaItem) -> bool:
+        """True if the source file changed since it was analysed."""
+        analysis = item.reframe.analysis if item.reframe else None
+        if analysis is None or analysis.source_size is None:
+            return False
+        try:
+            stat = Path(item.path).stat()
+        except OSError:
+            return False
+        return stat.st_size != analysis.source_size or abs(round(stat.st_mtime, 3) - (analysis.source_mtime or 0)) > 1
+
+    def submit_reframe_analysis(self, media_id: str) -> Job:
+        item = self.media(media_id)
+        if item.status is MediaStatus.MISSING:
+            raise StudioError(f"{item.name}: the source file is missing.")
+        if item.metadata is None:
+            raise StudioError("Video information has not been read yet.")
+        active = self.active_jobs(media_id, REFRAME_ANALYZE_JOB)
+        if active:
+            return active[0]
+        settings = self.reframe_state(media_id).settings
+        meta = item.metadata
+        payload = {
+            "path": item.path, "media_id": media_id,
+            "width": meta.display_width, "height": meta.display_height, "duration": meta.duration,
+            "sample_fps": settings.analysis_fps, "detect_persons": settings.detect_persons,
+            "models_dir": str(paths.data_dir() / "models"),
+        }
+        return self.services.jobs.submit(REFRAME_ANALYZE_JOB, f"Analyse faces/people: {item.name}", payload,
+                                         project_id=self.project.id)
+
+    def reframe_crop_path(self, media_id: str) -> CropPath:
+        """The crop path for the current settings (raises ReframeError when it cannot be computed)."""
+        item = self.media(media_id)
+        if item.metadata is None:
+            raise StudioError("Video information has not been read yet.")
+        state = self.reframe_state(media_id)
+        meta = item.metadata
+        return compute_crop_path(state.analysis, state.settings, meta.display_width, meta.display_height,
+                                 meta.duration)
+
+    def reframe_output_size(self, media_id: str) -> tuple[int, int]:
+        meta = self.media(media_id).metadata
+        return resolve_output_size(self.reframe_state(media_id).settings, meta.display_width, meta.display_height)
+
+    def reframe_ass(self, media_id: str) -> str | None:
+        """Caption ASS for the reframed output size, or None when captions are not burned in."""
+        item = self.media(media_id)
+        if not self.reframe_state(media_id).settings.burn_captions or not item.captions or not item.captions.segments:
+            return None
+        out_w, out_h = self.reframe_output_size(media_id)
+        return build_ass(item.captions.segments, item.effective_caption_style, out_w, out_h, title=item.name)
+
+    def _reframe_payload(self, media_id: str, path: CropPath) -> dict:
+        item = self.media(media_id)
+        meta = item.metadata
+        out_w, out_h = self.reframe_output_size(media_id)
+        return {
+            "path": item.path, "media_id": media_id,
+            "src_w": path.src_w, "src_h": path.src_h, "crop_w": path.crop_w, "crop_h": path.crop_h,
+            "keyframes": path.keyframes(), "out_w": out_w, "out_h": out_h,
+            "fps": meta.fps, "duration": meta.duration, "ass": self.reframe_ass(media_id),
+        }
+
+    def submit_reframe_export(self, media_id: str, output: str, path: CropPath | None = None) -> Job:
+        item = self.media(media_id)
+        if item.status is MediaStatus.MISSING:
+            raise StudioError(f"{item.name}: the source file is missing.")
+        if Path(output).resolve() == Path(item.path).resolve():
+            raise StudioError("Choose a different file name: the source video is never overwritten.")
+        path = path or self.reframe_crop_path(media_id)
+        state = self.reframe_state(media_id)
+        if state.settings.mode == "track" and path.tracked_fraction == 0:
+            raise StudioError("The selected subject is never visible, so the export would not follow anyone. "
+                              "Choose another subject or Center crop.")
+        meta = item.metadata
+        payload = self._reframe_payload(media_id, path) | {
+            "output": output, "audio_codec": meta.audio_codec, "has_audio": meta.has_audio,
+            "encoder": self.services.settings.get("video_encoder"),
+            "quality": self.services.settings.get("video_quality"),
+        }
+        return self.services.jobs.submit(REFRAME_EXPORT_JOB, f"Export reframed: {item.name}", payload,
+                                         project_id=self.project.id)
+
+    def submit_reframe_preview(self, media_id: str, at_seconds: float) -> Job:
+        path = self.reframe_crop_path(media_id)
+        payload = self._reframe_payload(media_id, path) | {"at": at_seconds}
+        return self.services.jobs.submit(REFRAME_PREVIEW_JOB, f"Reframe frame preview: {self.media(media_id).name}",
+                                         payload, project_id=self.project.id)
+
+    def _apply_analysis(self, item: MediaItem, data: dict) -> list[str]:
+        """Store a finished analysis; returns notes about settings that had to be reset."""
+        analysis = TrackingAnalysis.from_dict(data)
+        state = item.reframe or ReframeState()
+        notes = []
+        ids = {t.id for t in analysis.tracks}
+        settings = state.settings
+        if settings.target is not None and settings.target not in ids:
+            settings.target = None
+            notes.append("The previously selected subject no longer exists; automatic selection is used.")
+        if any(int(tid) not in ids for _t, tid in settings.switches if tid is not None):
+            settings.switches = []
+            notes.append("Subject changes referred to old tracking results and were cleared.")
+        item.reframe = ReframeState(settings, analysis)
+        self.project.dirty = True
+        return notes
+
+    def _on_reframe_analysis(self, job: Job) -> None:
+        media_id = job.payload.get("media_id", "")
+        item = self.project.find_media(media_id)
+        if item is None or not job.state.is_finished:
+            return
+        if job.state is JobState.COMPLETED and job.result and job.result.get("analysis"):
+            notes = self._apply_analysis(item, job.result["analysis"])
+            if notes:
+                job.result.setdefault("notes", []).extend(notes)
+            self.reframe_changed.emit(media_id)
+            self.dirty_changed.emit(True)
+        self.reframe_analysis_finished.emit(media_id, job)
+
+    def _recover_reframe_analyses(self) -> None:
+        """Apply analyses that finished while their project was closed (only where none is stored)."""
+        completed = self.services.jobs.store.list({JobState.COMPLETED})
+        for job in sorted(completed, key=lambda j: j.finished_at or "", reverse=True):  # newest first
+            if job.kind != REFRAME_ANALYZE_JOB or job.project_id != self.project.id or not job.result:
+                continue
+            item = self.project.find_media(job.result.get("media_id", ""))
+            if item is not None and (item.reframe is None or item.reframe.analysis is None):
+                self._apply_analysis(item, job.result["analysis"])
+                log.info("Recovered tracking analysis", extra={"job_id": job.id, "media_id": item.id})
+        if self.project.dirty:
+            self.dirty_changed.emit(True)

@@ -11,11 +11,6 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from ai_video_studio.ui.widgets.common import Card, muted, page_title, section_title
 
 PLANNED_PAGES: dict[str, tuple[int, list[str]]] = {
-    "Face Tracking": (3, [
-        "Face/person detection and tracking with target selection",
-        "Smoothed crop paths, dead zone, padding, manual correction",
-        "16:9 → 9:16 / 1:1 reframing applied to the real export",
-    ]),
     "Smart Cut": (4, [
         "Audio silence detection with threshold, minimum duration and padding",
         "Reviewable cut proposals, manual ranges, undo/redo",

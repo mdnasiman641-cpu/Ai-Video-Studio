@@ -6,7 +6,7 @@ import logging
 
 from typing import Callable
 
-from PySide6.QtCore import QRectF, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
@@ -53,6 +53,10 @@ class VideoCanvas(QWidget):
     def clear(self) -> None:
         self._image = None
         self.update()
+
+    def image(self) -> QImage | None:
+        """The last decoded frame, or None."""
+        return self._image
 
     def frame_size(self) -> QSize | None:
         return self._image.size() if self._image is not None else None
@@ -249,10 +253,18 @@ class VideoPreview(QWidget):
         if status == QMediaPlayer.MediaStatus.LoadedMedia:
             self.status_label.setText("Ready")
             if self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
-                # Pausing from the stopped state decodes and shows the first frame.
-                self.player.pause()
+                # Deferred: this signal is also emitted from inside player.stop() (called by load()
+                # and the Stop button), and calling pause() re-entrantly there can deadlock Qt's
+                # FFmpeg media backend.
+                QTimer.singleShot(0, self, self._show_first_frame)
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
             self.status_label.setText("This video cannot be previewed.")
+
+    def _show_first_frame(self) -> None:
+        """Pausing from the stopped state decodes and shows the first frame."""
+        if (self.player.mediaStatus() == QMediaPlayer.MediaStatus.LoadedMedia
+                and self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState):
+            self.player.pause()
 
     def _on_error(self, error, message: str) -> None:
         if error != QMediaPlayer.Error.NoError:

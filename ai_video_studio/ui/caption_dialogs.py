@@ -280,9 +280,10 @@ class CorrectionReviewDialog(QDialog):
 
 
 class FramePreviewDialog(QDialog):
-    def __init__(self, image_path: str, at_seconds: float, parent=None):
+    def __init__(self, image_path: str, at_seconds: float, parent=None, title: str = "Exact Caption Render",
+                 note: str = "Rendered by FFmpeg/libass exactly as it will appear in the exported video."):
         super().__init__(parent)
-        self.setWindowTitle(f"Exact Caption Render at {at_seconds:.2f} s")
+        self.setWindowTitle(f"{title} at {at_seconds:.2f} s")
         pixmap = QPixmap(image_path)
         label = QLabel()
         label.setPixmap(pixmap.scaled(1280, 720, Qt.AspectRatioMode.KeepAspectRatio,
@@ -290,7 +291,7 @@ class FramePreviewDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidget(label)
         scroll.setWidgetResizable(True)
-        note = QLabel("Rendered by FFmpeg/libass exactly as it will appear in the exported video.")
+        note = QLabel(note)
         note.setObjectName("Muted")
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(self.reject)
