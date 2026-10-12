@@ -104,6 +104,29 @@ class RenderPreset:
         return RenderPreset.from_dict(json.loads(json.dumps(self.to_dict())))
 
 
+def preset_from_edit(resize: ResizeSettings | None, *, use_cuts: bool, smart_cut_settings: SmartCutSettings,
+                     burn_captions: bool, caption_style: CaptionStyle | None, effects: EditEffects,
+                     tracking_mode: str, output: OutputSettings) -> RenderPreset:
+    """Bulk settings equivalent to one video's Edit page settings (for Bulk Processing).
+
+    Framing: Resize & Crop, Auto Reframe or the original frame; Smart Cut detects silence in every
+    video with the same settings; the caption style is used for every video's captions.
+    """
+    on = resize is not None and resize.enabled
+    r = ResizeSettings.from_dict(resize.to_dict()) if resize else ResizeSettings()
+    r.burn_captions, r.use_cuts = burn_captions, False
+    operation = ("reframe" if r.mode == "reframe" else "resize") if on else "none"
+    if operation == "reframe":
+        r.mode = "fill"  # unused by Auto Reframe; keeps the preset valid
+    preset = RenderPreset(operation=operation, resize=r, tracking_mode=tracking_mode, output=output,
+                          filename_template="{original_name}_edited", smart_cut=use_cuts,
+                          smart_cut_settings=SmartCutSettings.from_dict(smart_cut_settings.to_dict()),
+                          caption_style=CaptionStyle.from_dict(caption_style.to_dict()) if burn_captions and
+                          caption_style else None, effects=effects.copy())
+    preset.validate()
+    return preset
+
+
 def reframe_aspect(out_w: int, out_h: int) -> str | None:
     return next((name for name, ratio in ASPECT_PRESETS.items()
                  if ratio and abs(ratio[0] / ratio[1] - out_w / out_h) < 0.01), None)

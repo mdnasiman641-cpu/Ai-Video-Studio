@@ -83,6 +83,7 @@ class ResizeSettings:
     blur: int = 20
     burn_captions: bool = False
     use_cuts: bool = True      # apply the Smart Cut cuts, if any
+    enabled: bool = True       # Edit page final export: resize/crop (or Auto Reframe) is switched on
 
     def validate(self) -> None:
         errors = []

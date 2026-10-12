@@ -345,6 +345,13 @@ class BulkPage(QWidget):
         self.batch.preset_name = name
         self._on_shared_changed()
 
+    def use_shared_preset(self, preset) -> None:
+        """Use settings made elsewhere (the Edit page) as the batch's shared settings."""
+        self.editor.set_preset(preset)
+        self.batch.preset_name = ""
+        self._on_shared_changed()
+        self.summary.setText("Shared settings taken from the Edit page. Add videos and start the batch.")
+
     def save_preset(self) -> None:
         try:
             preset = self.editor.preset()

@@ -8,6 +8,18 @@ Combined editing, bulk editing with shared settings, caption templates, speed an
 Project files become version 6 (new optional keys; version 1-5 files open unchanged).
 
 ### Added
+- **Edit page workspace:** a compact tool bar (Smart Cut, Captions, Resize / Crop, Auto Reframe,
+  Speed, Audio, Final Export) opens each tool's settings in the right-hand panel, without leaving
+  the page.
+  - Smart Cut: analyse, detect with threshold and minimum silence, review and apply cuts.
+  - Captions: generate and import/export SRT with the Captions page dialogs; edit text and times;
+    templates for the selected or all captions; the style editor.
+  - Resize / Crop: size, mode, position, crop region and blur, with an exact frame preview.
+  - Auto Reframe: tracking mode and face analysis.
+  - Speed, Audio, and a summary of what the export includes.
+
+  The settings are the video's own (shared with the other pages) and saved in the project.
+  **Use These Settings in Bulk Processing** copies them to the batch's shared settings.
 - **Export Final Video** (Edit page): one export, one encode, with any of these switched on:
   - the Smart Cut cuts;
   - Resize & Crop or Auto Reframe (Resize & Crop page settings);

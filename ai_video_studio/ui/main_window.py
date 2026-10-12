@@ -81,12 +81,14 @@ class MainWindow(QMainWindow):
 
         self.home_page = HomePage(services)
         self.media_page = MediaPage(self.controller)
-        self.edit_page = EditPage(self.controller)
+        self.edit_page = EditPage(self.controller, self.bridge)
         self.captions_page = CaptionsPage(self.controller, self.bridge)
         self.reframe_page = ReframePage(self.controller, self.bridge)
         self.smart_cut_page = SmartCutPage(self.controller, self.bridge)
         self.resize_page = ResizePage(self.controller, self.bridge)
         self.bulk_page = BulkPage(self.controller, self.bridge)
+        self.edit_page.captions_page = self.captions_page  # Generate / SRT dialogs reused on the Edit page
+        self.edit_page.bulk_requested.connect(self._edit_settings_to_bulk)
         self.ai_page = AIModelsPage(services, self.bridge)
         self.queue_page = QueuePage(services, self.bridge)
         self.settings_page = SettingsPage(services, on_tools_changed=self._on_tools_changed)
@@ -165,6 +167,10 @@ class MainWindow(QMainWindow):
         return action
 
     # -- navigation ----------------------------------------------------------
+    def _edit_settings_to_bulk(self, preset) -> None:
+        self.bulk_page.use_shared_preset(preset)
+        self.navigate("Bulk Processing")
+
     def navigate(self, name: str) -> None:
         self.sidebar.setCurrentRow(list(self._page_index).index(name))
 

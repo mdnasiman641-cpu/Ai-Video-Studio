@@ -736,6 +736,49 @@ class ProjectController(QObject):
         return self.services.jobs.submit(RENDER_JOB, title or f"Export edited video: {item.name}", payload,
                                          project_id=self.project.id)
 
+    def final_operations(self, media_id: str) -> dict:
+        """What the Edit page final export includes, from the video's saved settings.
+
+        The switches are the same settings the other pages use: Smart Cut cuts and caption burn-in
+        (``ResizeSettings.use_cuts``/``burn_captions``), Resize & Crop or Auto Reframe (Resize & Crop
+        settings with ``enabled``; mode "reframe" = Auto Reframe) and the speed/audio effects. An
+        operation is only included when its data exists (applied cuts, captions).
+        """
+        item = self.media(media_id)
+        rs = item.resize
+        cuts = self.applied_cuts(media_id)
+        has_captions = bool(item.captions and item.captions.segments)
+        use_resize = rs is not None and rs.enabled
+        return {"use_cuts": bool(cuts) and (rs.use_cuts if rs else True), "cuts_available": bool(cuts),
+                "burn_captions": has_captions and bool(rs and rs.burn_captions), "captions_available": has_captions,
+                "use_resize": use_resize, "reframe": use_resize and rs.mode == "reframe",
+                "effects": self.effects(media_id)}
+
+    def submit_final_frame(self, media_id: str, at_seconds: float) -> Job:
+        """Render the source frame at ``at_seconds`` with the final export's framing and captions."""
+        item = self.media(media_id)
+        ops = self.final_operations(media_id)
+        stage, canvas = None, (item.metadata.display_width, item.metadata.display_height)
+        if ops["use_resize"]:
+            stage, canvas, _notes = self.resize_stage(media_id)
+        ass = None
+        if ops["burn_captions"]:
+            ass = build_ass(item.captions.segments, item.effective_caption_style, *canvas, title=item.name)
+        payload = {"path": item.path, "media_id": media_id, "at": at_seconds, "stage": stage, "ass": ass}
+        return self.services.jobs.submit(RENDER_FRAME_JOB, f"Final frame preview: {item.name}", payload,
+                                         project_id=self.project.id)
+
+    def update_resize(self, media_id: str, **changes) -> ResizeSettings:
+        """Change some Resize & Crop settings (a video without any starts with resizing switched off)."""
+        item = self.media(media_id)
+        settings = ResizeSettings.from_dict(item.resize.to_dict()) if item.resize else ResizeSettings(enabled=False)
+        for key, value in changes.items():
+            if key not in ResizeSettings.__dataclass_fields__:
+                raise KeyError(key)
+            setattr(settings, key, value)
+        self.set_resize_settings(media_id, settings)
+        return settings
+
     def submit_combined_export(self, media_id: str, output: str, settings: OutputSettings, *, use_cuts: bool,
                                use_resize: bool, burn_captions: bool, use_effects: bool,
                                overwrite: bool = False) -> Job:

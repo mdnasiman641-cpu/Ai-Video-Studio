@@ -307,3 +307,25 @@ def test_one_failure_does_not_stop_the_queue_and_retry_repeats_only_failures(db)
     assert manager.store.get(jobs[5].id).state is JobState.COMPLETED
     assert calls["v05"] == 2 and all(n == 1 for k, n in calls.items() if k != "v05")  # successes not redone
     manager.shutdown()
+
+
+def test_edit_page_settings_convert_to_bulk_settings():
+    from ai_video_studio.render.batch import BatchError, preset_from_edit
+
+    common = {"smart_cut_settings": SmartCutSettings(threshold_db=-42), "caption_style": BUILTIN_PRESETS["Bold Green"],
+              "effects": EditEffects(speed_enabled=True, video_speed=1.5), "tracking_mode": "auto_face",
+              "output": OutputSettings()}
+    resized = preset_from_edit(ResizeSettings(preset="1080x1080", mode="fill"), use_cuts=True, burn_captions=True,
+                               **common)
+    assert resized.operation == "resize" and resized.resize.preset == "1080x1080" and resized.resize.burn_captions
+    assert resized.smart_cut and resized.smart_cut_settings.threshold_db == -42
+    assert resized.caption_style == BUILTIN_PRESETS["Bold Green"] and resized.effects.video_factor == 1.5
+    reframed = preset_from_edit(ResizeSettings(preset="1080x1920", mode="reframe"), use_cuts=False,
+                                burn_captions=False, **common)
+    assert reframed.operation == "reframe" and reframed.caption_style is None and not reframed.smart_cut
+    off = preset_from_edit(ResizeSettings(enabled=False), use_cuts=False, burn_captions=False, **common)
+    assert off.operation == "none"
+    assert preset_from_edit(None, use_cuts=False, burn_captions=False, **common).operation == "none"
+    with pytest.raises(BatchError, match="Batch Resize"):  # a manual crop region is chosen per video
+        preset_from_edit(ResizeSettings(mode="crop"), use_cuts=False, burn_captions=False, **common)
+    assert ResizeSettings.from_dict({"preset": "1080x1080"}).enabled  # older saved settings
