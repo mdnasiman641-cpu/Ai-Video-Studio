@@ -43,7 +43,7 @@ from ai_video_studio.reframe.framing import (
     compute_crop_path,
     resolve_output_size,
 )
-from ai_video_studio.reframe.model import ReframeSettings, ReframeState, TrackingAnalysis
+from ai_video_studio.reframe.model import ReframeSettings, ReframeState, TrackingAnalysis, reanalysis_reasons
 from ai_video_studio.services import Services
 from ai_video_studio.storage.project import Project
 from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
@@ -749,8 +749,10 @@ class ProjectController(QObject):
         cuts = self.applied_cuts(media_id)
         has_captions = bool(item.captions and item.captions.segments)
         use_resize = rs is not None and rs.enabled
+        burn_requested = bool(rs and rs.burn_captions)
         return {"use_cuts": bool(cuts) and (rs.use_cuts if rs else True), "cuts_available": bool(cuts),
-                "burn_captions": has_captions and bool(rs and rs.burn_captions), "captions_available": has_captions,
+                "burn_captions": has_captions and burn_requested, "captions_available": has_captions,
+                "captions_missing": burn_requested and not has_captions,
                 "use_resize": use_resize, "reframe": use_resize and rs.mode == "reframe",
                 "effects": self.effects(media_id)}
 
@@ -783,7 +785,23 @@ class ProjectController(QObject):
                                use_resize: bool, burn_captions: bool, use_effects: bool,
                                overwrite: bool = False) -> Job:
         """One export with every chosen operation: Smart Cut cuts, Resize & Crop or Auto Reframe
-        (the Resize & Crop page settings), captions and speed/audio effects."""
+        (the Resize & Crop page settings), captions and speed/audio effects.
+
+        A switched-on operation that cannot be applied stops the export with the reason; it is never
+        left out silently.
+        """
+        item = self.media(media_id)
+        if burn_captions and not (item.captions and item.captions.segments):
+            raise StudioError("Burning in captions is on, but this video has no captions. Generate or import them "
+                              "(Captions tool), or turn burn-in off.")
+        effects = self.effects(media_id)
+        if use_effects and effects.audio_active:
+            if item.metadata is not None and not item.metadata.has_audio:
+                raise StudioError("Audio processing is on, but this video has no audio track. Turn audio processing "
+                                  "off (Audio tool).")
+            if settings.audio == "none":
+                raise StudioError("Audio processing is on, but the export settings say 'No audio'. Choose an audio "
+                                  "mode in the export settings or turn audio processing off.")
         stage, canvas = None, None
         if use_resize:
             stage, canvas, _notes = self.resize_stage(media_id)
@@ -824,6 +842,10 @@ class ProjectController(QObject):
         if settings.tracks_subjects and state.analysis is None:
             raise LayoutError("Auto Reframe needs a face/person analysis. Analyse this video on the Auto Reframe "
                               "page first (or choose Center Crop there).")
+        reasons = reanalysis_reasons(state.analysis, settings) if settings.tracks_subjects else []
+        if reasons:  # never use an analysis made for another mode silently
+            raise LayoutError("Auto Reframe needs a new analysis: " + " ".join(reasons) + " Analyse the video "
+                              "again (Analyse Faces).")
         meta = item.metadata
         band = caption_band_from_style(item.effective_caption_style) if burn_captions and item.captions else None
         return compute_crop_path(state.analysis, settings, meta.display_width, meta.display_height, meta.duration,

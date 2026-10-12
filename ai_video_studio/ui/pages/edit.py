@@ -334,30 +334,34 @@ class EditPage(QWidget):
         cuts = self.controller.applied_cuts(item.id)
         row(ops["use_cuts"], "Smart Cut", f"{len(cuts)} kept part(s), {format_duration(kept_duration(cuts))}"
             if ops["use_cuts"] else ("off" if ops["cuts_available"] else "no cuts applied"))
-        row(ops["burn_captions"], "Captions", f"{len(item.captions.segments)} caption(s) burned in"
-            if ops["burn_captions"] else ("off" if ops["captions_available"] else "no captions"))
+        if ops["captions_missing"]:
+            rows.append("⚠ <b>Captions</b>: burn-in is on, but this video has no captions yet (generate or import "
+                        "them in the Captions tool); the export stops until they exist or burn-in is off")
+        else:
+            row(ops["burn_captions"], "Captions", f"{len(item.captions.segments)} caption(s) burned in"
+                if ops["burn_captions"] else ("off" if ops["captions_available"] else "no captions"))
         s = self.controller.resize_settings(item.id)
         if ops["use_resize"]:
-            try:
-                layout = self.controller.resize_layout(item.id, s)
-                size = f"{layout.out_w}×{layout.out_h}"
+            try:  # the same calculation the export uses, so a problem shows here, not only on export
+                stage, (w, h), _notes = self.controller.resize_stage(item.id, s)
+                if ops["reframe"]:
+                    mode = TRACKING_MODES[self.controller.reframe_state(item.id).settings.tracking_mode].label
+                    row(True, "Framing", f"Auto Reframe, {w}×{h} ({mode})")
+                else:
+                    row(True, "Framing", f"Resize / Crop, {w}×{h}, {MODES[s.mode].split(' —')[0]}")
             except StudioError as exc:
-                size = f"⚠ {exc}"
-            if ops["reframe"]:
-                mode = TRACKING_MODES[self.controller.reframe_state(item.id).settings.tracking_mode].label
-                row(True, "Framing", f"Auto Reframe, {size} ({mode})")
-            else:
-                row(True, "Framing", f"Resize / Crop, {size}, {MODES[s.mode].split(' —')[0]}")
+                rows.append(f"⚠ <b>Framing</b>: {exc}")
         else:
             row(False, "Framing", "original frame")
         effects = ops["effects"]
         speed = [p for p in effects.summary() if p.startswith(("speed", "video "))]
         audio = [p for p in effects.summary() if p not in speed]
         row(bool(speed), "Speed", speed[0] if speed else "unchanged")
-        detail = ", ".join(audio) if audio else "unchanged"
         if audio and not item.metadata.has_audio:
-            detail += " ⚠ the video has no audio track"
-        row(bool(audio), "Audio", detail)
+            rows.append("⚠ <b>Audio</b>: " + ", ".join(audio) + " is on, but the video has no audio track; the "
+                        "export stops until audio processing is off")
+        else:
+            row(bool(audio), "Audio", ", ".join(audio) if audio else "unchanged")
         return "<br>".join(rows)
 
     def export_final(self) -> Job | None:
@@ -379,7 +383,7 @@ class EditPage(QWidget):
             ops = self.controller.final_operations(self._current_id)
             job = self.controller.submit_combined_export(
                 self._current_id, output, settings, use_cuts=ops["use_cuts"], use_resize=ops["use_resize"],
-                burn_captions=ops["burn_captions"], use_effects=True, overwrite=overwrite)
+                burn_captions=ops["burn_captions"] or ops["captions_missing"], use_effects=True, overwrite=overwrite)
             self.controller.services.remember_output_settings(settings)
         except StudioError as exc:
             QMessageBox.warning(self, "Export Final Video", str(exc))

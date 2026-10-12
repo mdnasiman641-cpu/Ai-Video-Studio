@@ -84,6 +84,7 @@ class ResizeSettings:
     burn_captions: bool = False
     use_cuts: bool = True      # apply the Smart Cut cuts, if any
     enabled: bool = True       # Edit page final export: resize/crop (or Auto Reframe) is switched on
+    mode_before_reframe: str = ""  # the fixed mode to return to when Auto Reframe is switched off
 
     def validate(self) -> None:
         errors = []

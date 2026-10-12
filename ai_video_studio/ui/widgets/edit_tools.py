@@ -279,8 +279,7 @@ class CaptionsPanel(ToolPanel):
 
     def fill(self, item: MediaItem) -> None:
         ops = self.controller.final_operations(item.id)
-        self.burn.setEnabled(ops["captions_available"])
-        self.burn.setChecked(ops["burn_captions"])
+        self.burn.setChecked(ops["burn_captions"] or ops["captions_missing"])  # can be switched on before captions exist
         selected = set(self.selected_ids())
         self.table.blockSignals(True)
         self.table.setRowCount(0)
@@ -299,8 +298,12 @@ class CaptionsPanel(ToolPanel):
                 self.table.selectRow(r)
         self.table.blockSignals(False)
         self.export_button.setEnabled(bool(segments))
-        self.status.setText(f"{len(segments)} caption(s)." if segments else
-                            "No captions yet: generate them or import an SRT file.")
+        if segments:
+            self.status.setText(f"{len(segments)} caption(s)." + ("" if ops["burn_captions"] else
+                                                                   " Not burned in (switch it on above)."))
+        else:
+            self.status.setText(("⚠ Burn-in is on, but there are no captions yet: " if ops["captions_missing"] else
+                                 "No captions yet: ") + "generate them or import an SRT file.")
         self.style_editor.set_style(item.effective_caption_style)
 
     def _edit_track(self, operation) -> None:
@@ -491,8 +494,7 @@ class ResizePanel(ToolPanel):
             s.zoom = self.zoom.value() / 100
             s.crop_x, s.crop_y, s.crop_w, s.crop_h = (b.value() / 100 for b in self.crop)
             s.blur = self.blur.value()
-            if self.page.current().resize is None:
-                s.enabled = True  # changing the framing switches it on
+            s.enabled = True  # changing the framing switches it on (it may have been off, e.g. never resized)
             self.controller.set_resize_settings(self.media_id(), s)
         self.guarded(change)
 
@@ -510,7 +512,6 @@ class ReframePanel(ToolPanel):
             self.tracking.addItem(info.label, key)
         self.analyse_button = QPushButton("Analyse Faces")
         self.preview_button = QPushButton("Preview Frame")
-        self._previous_mode = "fill"
         form = QFormLayout()
         form.addRow("Tracking mode:", self.tracking)
         row = QHBoxLayout()
@@ -555,11 +556,13 @@ class ReframePanel(ToolPanel):
         def change() -> None:
             s = self.controller.resize_settings(self.media_id())
             if on:
-                if s.mode != "reframe":
-                    self._previous_mode = s.mode
-                self.controller.update_resize(self.media_id(), mode="reframe", enabled=True)
-            elif s.mode == "reframe":
-                self.controller.update_resize(self.media_id(), mode=self._previous_mode)
+                before = s.mode if s.mode != "reframe" else s.mode_before_reframe
+                self.controller.update_resize(self.media_id(), mode="reframe", enabled=True,
+                                              mode_before_reframe=before)
+            elif s.mode == "reframe":  # back to the user's own fixed framing (saved with the project)
+                back = s.mode_before_reframe if s.mode_before_reframe in MODES and \
+                    s.mode_before_reframe != "reframe" else "fill"
+                self.controller.update_resize(self.media_id(), mode=back)
         self.guarded(change)
 
     def _on_tracking(self, *_args) -> None:

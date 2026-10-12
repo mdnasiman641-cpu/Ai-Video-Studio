@@ -282,3 +282,99 @@ def test_bulk_automatic_captions_option_and_missing_model(qtbot, window, tmp_pat
     assert "Whisper model 'small'" in warnings[-1] and "Speech recognition models" in warnings[-1]
     t = page.transcription_settings()
     assert t["model"] == window.services.settings.get("whisper_model") and t["device"] in ("auto", "cpu", "cuda")
+
+
+# -- Edit page settings → final export (jobs are only queued: the manager is paused) -----------------
+
+def queued_export(window, page, tmp_path, name="out.mp4", **settings):
+    window.services.jobs.pause()
+    return page.start_export(str(tmp_path / name), OutputSettings(encoder="cpu", **settings))
+
+
+def test_burn_in_before_captions_exist_is_reported_then_applied_with_the_style(window, tmp_path):
+    from ai_video_studio.captions.ass import build_ass
+    from ai_video_studio.captions.model import output_captions
+
+    window.navigate("Edit")
+    page = window.edit_page
+    c = window.controller
+    item = c.project.media[0]
+    caps = page.panels["captions"]
+    assert caps.burn.isEnabled()  # can be switched on before captions exist
+    caps.burn.setChecked(True)
+    assert c.final_operations(item.id)["captions_missing"] and "⚠" in caps.status.text()
+    assert "⚠ <b>Captions</b>: burn-in is on, but this video has no captions" in page.summary_html(item)
+    assert queued_export(window, page, tmp_path) is None  # never exported silently without captions
+    assert "no captions" in page.panels["final"].status.text()
+
+    c.set_captions(item.id, CaptionTrack([CaptionSegment(0.5, 1.5, "hello"), CaptionSegment(2.0, 2.6, "bye")]))
+    style = CaptionStyle(font_family="DejaVu Sans", font_size=70, text_color="#11EE22", outline_color="#220000",
+                         outline_width=5, background=True, background_opacity=40, alignment="left", vertical="top",
+                         margin_v=12)
+    caps.style_editor.set_style(style)
+    caps.style_editor.style_changed.emit(style)  # as when the user edits the style
+    assert item.caption_style == style
+    assert "✔ <b>Captions</b>: 2 caption(s) burned in" in page.summary_html(item)
+    job = queued_export(window, page, tmp_path)
+    meta = item.metadata
+    expected = build_ass(output_captions(item.captions.segments, None, 1.0), style, meta.display_width,
+                         meta.display_height, title=item.name)
+    assert job.payload["ass"] == expected  # the exact captions and style, nothing re-timed later
+    assert "captions" not in job.payload and "captions_auto" not in job.payload
+
+
+def test_framing_speed_audio_and_cuts_reach_the_export(window, tmp_path):
+    window.navigate("Edit")
+    page = window.edit_page
+    c = window.controller
+    item = c.project.media[0]
+    c.set_captions(item.id, CaptionTrack([CaptionSegment(2.2, 2.8, "late")]))
+    page.panels["captions"].burn.setChecked(True)  # creates resize settings with resizing off
+    assert not c.final_operations(item.id)["use_resize"]
+    resize = page.panels["resize"]
+    resize.size.setCurrentIndex(resize.size.findData("1080x1080"))  # changing the framing switches it on
+    assert c.final_operations(item.id)["use_resize"] and item.resize.preset == "1080x1080"
+    item.smart_cut = SmartCutState(applied=[(0.0, 1.0), (2.0, 3.0)])
+    c.smartcut_changed.emit(item.id)
+    form = page.effects_form
+    form.speed_enabled.setChecked(True)
+    form.video_speed.setValue(2.0)
+    form.preserve_pitch.setChecked(False)
+    form.audio_enabled.setChecked(True)
+    form.volume.setValue(80)
+    form.noise.setCurrentIndex(form.noise.findData("light"))
+    form.fade_in.setValue(0.5)
+    p = queued_export(window, page, tmp_path).payload
+    assert p["keep_ranges"] == [[0.0, 1.0], [2.0, 3.0]]  # applied cuts, in order
+    assert p["stage"]["type"] == "layout" and p["stage"]["layout"]["out_w"] == 1080
+    e = p["effects"]
+    assert (e["video_speed"], e["preserve_pitch"], e["volume"], e["noise_reduction"], e["fade_in"]) == \
+        (2.0, False, 80, "light", 0.5)
+    assert "Dialogue: 1,0:00:00.60,0:00:00.90,Default" in p["ass"]  # cut (2.2 → 1.2 s), then 2× (→ 0.6 s), once
+    # audio processing cannot be dropped silently
+    assert queued_export(window, page, tmp_path, "mute.mp4", audio="none") is None
+    assert "No audio" in page.panels["final"].status.text()
+
+
+def test_auto_reframe_keeps_the_users_mode_and_never_uses_a_wrong_analysis(window, tmp_path):
+    from ai_video_studio.reframe.model import ReframeState, TrackingAnalysis
+
+    window.navigate("Edit")
+    page = window.edit_page
+    c = window.controller
+    item = c.project.media[0]
+    c.set_resize_settings(item.id, ResizeSettings(preset="1080x1920", mode="crop", crop_w=0.5))
+    reframe = page.panels["reframe"]
+    reframe.use.setChecked(True)
+    assert item.resize.mode == "reframe" and item.resize.mode_before_reframe == "crop"
+    # an analysis made for faces only, while the chosen mode also needs speech
+    analysis = TrackingAnalysis(640, 360, 3.0, 5.0, 15, "test", features=["faces"])
+    settings = c.reframe_state(item.id).settings
+    settings.tracking_mode = "active_speaker"
+    item.reframe = ReframeState(settings, analysis)
+    c.reframe_changed.emit(item.id)
+    assert "new analysis" in reframe.status.text()
+    assert "⚠ <b>Framing</b>: Auto Reframe needs a new analysis" in page.summary_html(item)
+    assert queued_export(window, page, tmp_path) is None
+    reframe.use.setChecked(False)
+    assert item.resize.mode == "crop" and item.resize.crop_w == 0.5  # the user's own framing is back
