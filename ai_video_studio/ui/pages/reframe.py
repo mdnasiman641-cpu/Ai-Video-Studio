@@ -53,7 +53,7 @@ from ai_video_studio.reframe.model import (
 )
 from ai_video_studio.ui.caption_dialogs import FramePreviewDialog
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController
-from ai_video_studio.ui.widgets.caption_overlay import paint_captions
+from ai_video_studio.ui.widgets.caption_overlay import paint_segments
 from ai_video_studio.ui.widgets.common import muted, page_title
 from ai_video_studio.ui.widgets.tracking_options import TrackingOptions
 from ai_video_studio.ui.widgets.video_preview import VideoPreview
@@ -125,8 +125,8 @@ class OutputPreview(QWidget):
         painter.drawImage(rect, image, QRectF(x * kx, y * ky, w * kx, h * ky))
         settings = self.page.settings()
         if settings.burn_captions and item.captions is not None:
-            texts = [s.text for s in item.captions.active_at(self.page.preview.position_seconds())]
-            paint_captions(painter, rect, texts, item.effective_caption_style)
+            paint_segments(painter, rect, item.captions.active_at(self.page.preview.position_seconds()),
+                           item.effective_caption_style)
         if settings.caption_safe != "off":
             band = rect.height() * settings.caption_safe_height
             top = rect.bottom() - band if settings.caption_safe == "bottom" else rect.top()

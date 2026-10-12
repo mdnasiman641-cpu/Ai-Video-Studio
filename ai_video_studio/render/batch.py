@@ -1,10 +1,13 @@
 """Bulk Processing: export presets, batches of videos and their job payloads (no Qt).
 
 A batch holds a list of videos, shared settings (a :class:`RenderPreset`) and optional
-per-video overrides (a complete preset for that video). Starting a batch turns each ready
-video into one ``render_video`` job whose payload snapshots everything it needs: the layout
-or Auto Reframe settings, captions as ASS text sized for the output, the encode settings and
-the final output path. Jobs therefore survive restarts and later edits do not change them.
+per-video overrides (a complete preset for that video). A preset combines every operation
+with its own switch: framing (Resize & Crop, Auto Reframe or the original frame), Smart Cut
+silence removal, burned-in captions with an optional caption style, speed and audio effects,
+the encode settings and the file name. Starting a batch turns each ready video into one
+``render_video`` job whose payload snapshots everything it needs (captions as segments plus
+style, timed inside the job after the cuts are known), so all operations are encoded once,
+jobs survive restarts, and later edits do not change them.
 
 Built-in presets live in code and cannot be changed; user presets are stored in the user's
 database (in the application data folder), so updating the application never touches them.
@@ -17,7 +20,6 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ai_video_studio.captions.ass import build_ass
 from ai_video_studio.captions.model import CaptionSegment
 from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.core.errors import StudioError
@@ -25,12 +27,15 @@ from ai_video_studio.core.ffmpeg_tools import VideoMetadata
 from ai_video_studio.core.media import now_iso
 from ai_video_studio.reframe.framing import ASPECT_PRESETS
 from ai_video_studio.reframe.model import ReframeSettings
+from ai_video_studio.render.effects import EditEffects
 from ai_video_studio.render.layout import PRESETS, ResizeSettings, compute_layout
 from ai_video_studio.render.naming import CONFLICT_POLICIES, render_name, validate_template
 from ai_video_studio.render.output import OutputSettings
+from ai_video_studio.smartcut.model import SmartCutSettings
 from ai_video_studio.storage.database import Database
 
-OPERATIONS = {"resize": "Resize & Crop", "reframe": "Auto Reframe (face tracking)"}
+OPERATIONS = {"resize": "Resize & Crop", "reframe": "Auto Reframe (face tracking)",
+              "none": "Keep the original frame"}
 BATCH_TRACKING_MODES = ("auto_face", "active_speaker", "speech_audio", "auto_visible", "center")
 BATCH_RESIZE_MODES = ("fit", "fill", "blur", "custom")
 
@@ -46,10 +51,18 @@ class RenderPreset:
     tracking_mode: str = "auto_face"     # Auto Reframe operation
     output: OutputSettings = field(default_factory=OutputSettings)
     filename_template: str = "{original_name}_{resolution}"
+    smart_cut: bool = False              # remove silence (automatic detection, or the project's reviewed cuts)
+    smart_cut_settings: SmartCutSettings = field(default_factory=SmartCutSettings)
+    caption_style: CaptionStyle | None = None  # None = each video's own caption style
+    effects: EditEffects = field(default_factory=EditEffects)
 
     def validate(self) -> None:
         if self.operation not in OPERATIONS:
             raise BatchError(f"Unknown operation '{self.operation}'")
+        self.smart_cut_settings.validate()
+        self.effects.validate()
+        if self.caption_style is not None:
+            self.caption_style.validate()
         self.resize.validate()
         if self.operation == "resize" and self.resize.mode not in BATCH_RESIZE_MODES:
             raise BatchError("Batch Resize & Crop supports Fit, Fill, Blur background and Custom position "
@@ -66,14 +79,26 @@ class RenderPreset:
 
     def to_dict(self) -> dict:
         return {"operation": self.operation, "resize": self.resize.to_dict(), "tracking_mode": self.tracking_mode,
-                "output": self.output.to_dict(), "filename_template": self.filename_template}
+                "output": self.output.to_dict(), "filename_template": self.filename_template,
+                "smart_cut": self.smart_cut, "smart_cut_settings": self.smart_cut_settings.to_dict(),
+                "caption_style": self.caption_style.to_dict() if self.caption_style else None,
+                "effects": self.effects.to_dict()}
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "RenderPreset":
+        """Read a stored preset; presets saved before v0.8 have no Smart Cut, caption style or effects."""
         d = d or {}
+        try:
+            cut_settings = SmartCutSettings.from_dict(d.get("smart_cut_settings"))
+            cut_settings.validate()
+        except (StudioError, TypeError, ValueError):
+            cut_settings = SmartCutSettings()
         return cls(operation=d.get("operation", "resize"), resize=ResizeSettings.from_dict(d.get("resize")),
                    tracking_mode=d.get("tracking_mode", "auto_face"), output=OutputSettings.from_dict(d.get("output")),
-                   filename_template=d.get("filename_template", "{original_name}_{resolution}"))
+                   filename_template=d.get("filename_template", "{original_name}_{resolution}"),
+                   smart_cut=bool(d.get("smart_cut", False)), smart_cut_settings=cut_settings,
+                   caption_style=CaptionStyle.from_dict(d["caption_style"]) if d.get("caption_style") else None,
+                   effects=EditEffects.from_dict(d.get("effects")))
 
     def copy(self) -> "RenderPreset":
         return RenderPreset.from_dict(json.loads(json.dumps(self.to_dict())))
@@ -113,7 +138,14 @@ class RenderPresetStore:
         row = self._db.query_one("SELECT data FROM render_presets WHERE name = ?", (name,))
         if row is None:
             raise BatchError(f"Preset '{name}' does not exist")
-        return RenderPreset.from_dict(json.loads(row["data"]))
+        try:
+            data = json.loads(row["data"])
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+            return RenderPreset.from_dict(data)
+        except (TypeError, ValueError) as exc:
+            raise BatchError(f"The preset '{name}' is damaged and cannot be loaded. Delete it and save it "
+                             "again.") from exc
 
     def exists(self, name: str) -> bool:
         return name in BUILTIN_RENDER_PRESETS or self._db.query_one(
@@ -260,6 +292,8 @@ class BatchStore:
 
 
 def output_size(preset: RenderPreset, meta: VideoMetadata) -> tuple[int, int]:
+    if preset.operation == "none":
+        return meta.display_width, meta.display_height
     return preset.resize.output_size(meta.display_width, meta.display_height)
 
 
@@ -272,28 +306,45 @@ def output_name(preset: RenderPreset, item: BatchItem, index: int, preset_name: 
 
 def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwrite: bool, batch_id: str,
                   captions: list[CaptionSegment] | None, caption_style: CaptionStyle | None,
-                  tracking_defaults: ReframeSettings, models_dir: str) -> tuple[dict, list[str]]:
-    """The ``render_video`` payload for one batch video and notes for the user."""
+                  tracking_defaults: ReframeSettings, models_dir: str,
+                  reviewed_cuts: list[tuple[float, float]] | None = None) -> tuple[dict, list[str]]:
+    """The ``render_video`` payload for one batch video and notes for the user.
+
+    ``reviewed_cuts``: the video's Smart Cut cuts applied in the open project; with Smart Cut on
+    they are used instead of automatic detection.
+    """
     preset.validate()
     meta = item.metadata
     if meta is None:
         raise BatchError(f"{item.name}: video information has not been read.")
     notes: list[str] = []
     w, h = output_size(preset, meta)
-    ass = None
-    style = caption_style or CaptionStyle()
+    style = preset.caption_style or caption_style or CaptionStyle()
+    caption_data = None
     if preset.resize.burn_captions:
         if captions:
-            ass = build_ass(captions, style, w, h, title=item.name)
+            caption_data = {"segments": [s.to_dict() for s in captions], "style": style.to_dict(), "width": w,
+                            "height": h, "title": item.name}
         else:
             notes.append("No captions found (none in the project and no .srt file with the same name); "
                          "exported without captions.")
     payload = {
         "path": item.path, "media_id": None, "output": str(output), "overwrite": overwrite,
         "duration": meta.duration, "fps": meta.fps, "has_audio": meta.has_audio, "audio_codec": meta.audio_codec,
-        "keep_ranges": None, "ass": ass, "output_settings": preset.output.to_dict(),
+        "keep_ranges": None, "captions": caption_data, "output_settings": preset.output.to_dict(),
         "batch_id": batch_id, "batch_item": item.id,
+        "effects": preset.effects.to_dict() if preset.effects.active else None,
     }
+    if preset.smart_cut:
+        if not meta.has_audio:
+            notes.append("Smart Cut skipped: the video has no audio track.")
+        elif reviewed_cuts:
+            payload["keep_ranges"] = [list(r) for r in reviewed_cuts]
+            notes.append("Smart Cut: the cuts reviewed in the project are used.")
+        else:
+            payload["smartcut_auto"] = {"settings": preset.smart_cut_settings.to_dict()}
+    if preset.effects.audio_active and not meta.has_audio:
+        notes.append("Audio effects skipped: the video has no audio track.")
     if preset.operation == "reframe":
         settings = ReframeSettings.from_dict(tracking_defaults.to_dict())
         settings.tracking_mode = preset.tracking_mode
@@ -306,18 +357,54 @@ def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwr
             raise BatchError(f"{item.name}: {settings.mode_info.label} needs an audio track.")
         payload["reframe_auto"] = {
             "settings": settings.to_dict(),
-            "caption_style": style.to_dict() if ass else None,
+            "caption_style": style.to_dict() if caption_data else None,
             "analysis": {"width": meta.display_width, "height": meta.display_height, "duration": meta.duration,
                          "sample_fps": settings.analysis_rate(), "detect_persons": "persons" in features,
                          "features": features, "face_threshold": settings.confidence_threshold,
                          "models_dir": models_dir},
         }
-    else:
+    elif preset.operation == "resize":
         layout = compute_layout(meta.display_width, meta.display_height, preset.resize)
         payload["stage"] = {"type": "layout", "layout": layout.to_dict()}
         if layout.upscaled:
             notes.append(f"Enlarged {layout.scale:.2f}×.")
     return payload, notes
+
+
+def frame_preview_payload(item: BatchItem, preset: RenderPreset, captions: list[CaptionSegment] | None,
+                          caption_style: CaptionStyle | None) -> tuple[dict, list[str]]:
+    """A ``render_frame_preview`` payload showing one frame of a batch video with these settings.
+
+    It shows the framing and the caption style. Auto Reframe follows faces only during the export,
+    so its preview shows the centre crop; speed and audio cannot be seen in a still frame.
+    """
+    from ai_video_studio.captions.ass import build_ass
+
+    preset.validate()
+    meta = item.metadata
+    if meta is None:
+        raise BatchError(f"{item.name}: video information has not been read.")
+    w, h = output_size(preset, meta)
+    notes = []
+    stage = None
+    if preset.operation == "resize":
+        stage = {"type": "layout", "layout": compute_layout(meta.display_width, meta.display_height,
+                                                            preset.resize).to_dict()}
+    elif preset.operation == "reframe":
+        fill = ResizeSettings.from_dict(preset.resize.to_dict())
+        fill.mode = "fill"
+        stage = {"type": "layout", "layout": compute_layout(meta.display_width, meta.display_height, fill).to_dict()}
+        notes.append("Auto Reframe follows faces during the export; this preview shows the centre crop.")
+    at = meta.duration / 2 if meta.duration else 0.0
+    ass = None
+    if preset.resize.burn_captions and captions:
+        style = preset.caption_style or caption_style or CaptionStyle()
+        shown = [c for c in captions if c.start <= at <= c.end] or captions[:1]
+        at = at if any(c.start <= at <= c.end for c in captions) else (shown[0].start + shown[0].end) / 2
+        ass = build_ass(shown, style, w, h, title=item.name)
+    if preset.effects.active:
+        notes.append("Speed and audio effects are applied in the export (not visible in a still frame).")
+    return {"path": item.path, "media_id": None, "at": at, "stage": stage, "ass": ass}, notes
 
 
 def item_progress(states: list[tuple[str, float]]) -> float:

@@ -139,3 +139,13 @@ def paint_captions(painter: QPainter, rect: QRectF, texts: list[str], style: Cap
             painter.fillPath(stroke, _color(style.outline_color))
         painter.fillPath(path, _color(style.text_color))
     painter.restore()
+
+
+def paint_segments(painter: QPainter, rect: QRectF, segments, default: CaptionStyle) -> None:
+    """Draw caption segments; a caption with its own style is drawn with it, as in the export."""
+    groups: dict[str, tuple[CaptionStyle, list[str]]] = {}
+    for seg in segments:
+        key = repr(sorted(seg.style.items())) if seg.style else ""
+        groups.setdefault(key, (seg.style_or(default), []))[1].append(seg.text)
+    for style, texts in groups.values():
+        paint_captions(painter, rect, texts, style)

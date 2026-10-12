@@ -13,6 +13,7 @@ from ai_video_studio.captions.model import CaptionTrack
 from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.core.ffmpeg_tools import VideoMetadata
 from ai_video_studio.reframe.model import ReframeState
+from ai_video_studio.render.effects import EditEffects
 from ai_video_studio.render.layout import ResizeSettings
 from ai_video_studio.smartcut.model import SmartCutState
 
@@ -44,6 +45,7 @@ class MediaItem:
     reframe: ReframeState | None = None        # auto reframe settings and cached tracking results
     smart_cut: SmartCutState | None = None     # audio levels, cut proposal and applied cuts
     resize: ResizeSettings | None = None       # Resize & Crop settings
+    effects: EditEffects | None = None         # speed and audio effects (Edit page)
 
     @property
     def effective_caption_style(self) -> CaptionStyle:
@@ -81,6 +83,8 @@ class MediaItem:
             data["smart_cut"] = self.smart_cut.to_dict()
         if self.resize is not None:
             data["resize"] = self.resize.to_dict()
+        if self.effects is not None:
+            data["effects"] = self.effects.to_dict()
         if project_dir is not None:
             try:
                 data["relative_path"] = os.path.relpath(self.path, project_dir)
@@ -109,6 +113,7 @@ class MediaItem:
             reframe=ReframeState.from_dict(data["reframe"]) if data.get("reframe") else None,
             smart_cut=SmartCutState.from_dict(data["smart_cut"]) if data.get("smart_cut") else None,
             resize=ResizeSettings.from_dict(data["resize"]) if data.get("resize") else None,
+            effects=EditEffects.from_dict(data["effects"]) if data.get("effects") else None,
         )
 
 

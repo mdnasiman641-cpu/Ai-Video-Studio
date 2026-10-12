@@ -25,7 +25,13 @@ class PresetStore:
         row = self._db.query_one("SELECT style FROM caption_presets WHERE name = ?", (name,))
         if row is None:
             raise StudioError(f"Preset '{name}' does not exist")
-        return CaptionStyle.from_dict(json.loads(row["style"]))
+        try:
+            data = json.loads(row["style"])
+        except (TypeError, ValueError) as exc:
+            raise StudioError(f"The preset '{name}' is damaged and cannot be loaded. Delete it and save it again.") from exc
+        if not isinstance(data, dict):
+            raise StudioError(f"The preset '{name}' is damaged and cannot be loaded. Delete it and save it again.")
+        return CaptionStyle.from_dict(data)
 
     def save(self, name: str, style: CaptionStyle) -> None:
         name = name.strip()

@@ -8,9 +8,10 @@ part and its audio have the same length and audio/video stay in sync across many
 shorter. Timestamps inside the graph start at the beginning of the file (FFmpeg's default
 input offset), the same time base the preview player and the audio analysis use.
 
-The **video stage** (resize layout or moving reframe crop) runs on the joined timeline, and
-**subtitles** are rendered last, on the final canvas, from captions already remapped to the
-edited timeline. Long graphs are written to a script file (``-filter_complex_script``) to stay
+The **video stage** (resize layout or moving reframe crop) runs on the joined timeline, then
+the **speed** change (``setpts``; the frame rate is kept constant), and **subtitles** are
+rendered last, on the final canvas, from captions already remapped to the edited and retimed
+timeline. **Audio effects** (``render.effects``) follow the audio cuts in the same graph. Long graphs are written to a script file (``-filter_complex_script``) to stay
 below the Windows command-line length limit.
 """
 
@@ -66,12 +67,20 @@ def is_full_clip(ranges: list[tuple[float, float]] | None, duration: float | Non
     return len(ranges) == 1 and ranges[0][0] <= 0.001 and ranges[0][1] >= duration - 0.001
 
 
-def audio_plan(settings: OutputSettings, has_audio: bool, source_codec: str | None, cutting: bool) -> tuple[str, list[str]]:
-    """``(mode, notes)``; mode is none | copy | aac | filtered | all_tracks."""
+def audio_plan(settings: OutputSettings, has_audio: bool, source_codec: str | None, cutting: bool,
+               effects: bool = False) -> tuple[str, list[str]]:
+    """``(mode, notes)``; mode is none | copy | aac | filtered | all_tracks.
+
+    ``effects``: audio filters (speed or audio effects) are applied.
+    """
     if not has_audio or settings.audio == "none":
-        return "none", ([] if has_audio else ["The source has no audio track."])
-    if cutting:
-        notes = ["Audio is re-encoded to AAC because the video is cut."]
+        notes = [] if has_audio else ["The source has no audio track."]
+        if effects:
+            notes.append("Audio settings were not applied because the export has no audio.")
+        return "none", notes
+    if cutting or effects:
+        notes = ["Audio is re-encoded to AAC because the video is cut." if cutting else
+                 "Audio is re-encoded to AAC because speed or audio effects are applied."]
         if settings.all_audio_tracks:
             notes.append("Only the first audio track is kept when cutting.")
         return "filtered", notes
@@ -89,8 +98,15 @@ def build_filter_graph(
     video_stage: VideoStage | None = None,
     subtitle_file: str | None = None,
     target_fps: float | None = None,
+    video_filters: list[str] | None = None,
+    source_fps: float | None = None,
+    audio_filters: list[str] | None = None,
 ) -> tuple[str, str, str | None]:
-    """Return ``(graph, video_label, audio_label)``; ``audio_label`` is None when audio is not filtered."""
+    """Return ``(graph, video_label, audio_label)``; ``audio_label`` is None when audio is not filtered.
+
+    ``video_filters`` (speed) run after the video stage; ``source_fps`` then keeps the frame rate
+    constant when no ``target_fps`` is chosen. ``audio_filters`` run after the audio cuts.
+    """
     chains: list[str] = []
     video, audio = "0:v:0", None
     if keep_ranges:
@@ -112,9 +128,14 @@ def build_filter_graph(
     if video_stage is not None:
         chains.append(video_stage(video, "vstage"))
         video = "vstage"
-    tail = []
+    if has_audio and audio_filters:
+        chains.append(f"[{audio or '0:a:0'}]" + ",".join(audio_filters) + "[aout]")
+        audio = "aout"
+    tail = list(video_filters or [])
     if target_fps:
         tail.append(f"fps={target_fps:g}")
+    elif video_filters and source_fps:
+        tail.append(f"fps={source_fps:.6g}")
     if subtitle_file:
         check_filter_filename(subtitle_file)
         tail.append(f"subtitles={subtitle_file}")

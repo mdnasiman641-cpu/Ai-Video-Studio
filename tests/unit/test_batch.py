@@ -152,7 +152,9 @@ def test_payload_for_resize_and_reframe():
                                    captions=[CaptionSegment(0, 1, "Hi")], caption_style=None,
                                    tracking_defaults=ReframeSettings(), models_dir="/m")
     assert payload["stage"]["type"] == "layout" and payload["stage"]["layout"]["out_h"] == 1920
-    assert "PlayResY: 1920" in payload["ass"] and payload["batch_item"] == item.id and not notes
+    captions = payload["captions"]  # timed inside the job, after the cuts are known
+    assert captions["height"] == 1920 and captions["segments"][0]["text"] == "Hi"
+    assert payload["batch_item"] == item.id and not notes and payload["effects"] is None
     _payload, notes = build_payload(item, preset, Path("/out/clip.mp4"), overwrite=False, batch_id="b",
                                     captions=None, caption_style=None, tracking_defaults=ReframeSettings(),
                                     models_dir="/m")

@@ -91,6 +91,14 @@ class CaptionStyleEditor(QWidget):
         self.max_chars.setRange(8, 120)
         self.max_lines = QSpinBox()
         self.max_lines.setRange(1, 5)
+        self.fade_in, self.fade_out = QSpinBox(), QSpinBox()
+        for w in (self.fade_in, self.fade_out):
+            w.setRange(0, 2000)
+            w.setSingleStep(50)
+            w.setSuffix(" ms")
+        fade_row = QHBoxLayout()
+        fade_row.addWidget(self.fade_in)
+        fade_row.addWidget(self.fade_out)
 
         font_row = QHBoxLayout()
         font_row.addWidget(self.bold)
@@ -123,8 +131,10 @@ class CaptionStyleEditor(QWidget):
         form.addRow("Box (colour, opacity, padding):", bg_row)
         form.addRow("Characters per line:", self.max_chars)
         form.addRow("Max lines:", self.max_lines)
+        form.addRow("Fade in / out:", fade_row)
 
-        for w in (self.size, self.shadow_opacity, self.background_opacity, self.max_chars, self.max_lines):
+        for w in (self.size, self.shadow_opacity, self.background_opacity, self.max_chars, self.max_lines,
+                  self.fade_in, self.fade_out):
             w.valueChanged.connect(self._emit)
         for w in (self.outline_width, self.shadow_offset, self.margin_v, self.margin_h, self.background_padding):
             w.valueChanged.connect(self._emit)
@@ -162,6 +172,8 @@ class CaptionStyleEditor(QWidget):
             self.background_padding.setValue(style.background_padding)
             self.max_chars.setValue(style.max_chars_per_line)
             self.max_lines.setValue(style.max_lines)
+            self.fade_in.setValue(style.fade_in_ms)
+            self.fade_out.setValue(style.fade_out_ms)
         finally:
             self._loading = False
 
@@ -188,6 +200,8 @@ class CaptionStyleEditor(QWidget):
             background_padding=self.background_padding.value(),
             max_chars_per_line=self.max_chars.value(),
             max_lines=self.max_lines.value(),
+            fade_in_ms=self.fade_in.value(),
+            fade_out_ms=self.fade_out.value(),
         )
 
     def _on_font(self, font: QFont) -> None:

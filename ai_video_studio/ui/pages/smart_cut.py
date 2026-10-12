@@ -696,6 +696,9 @@ class SmartCutPage(QWidget):
         cuts = self.controller.applied_cuts(self._media_id)
         notes = [f"{len(cuts)} kept part(s), {format_duration(kept_duration(cuts))} in total." if cuts
                  else "No cuts are applied: the whole video is exported."]
+        effects = self.controller.effects(self._media_id).summary()
+        if effects:
+            notes.append("Speed and audio (Edit page): " + ", ".join(effects) + ".")
         source = Path(item.path)
         dialog = ExportDialog(self, "Export Edited Video", item.path, str(source.with_name(f"{source.stem}_cut.mp4")),
                               self.services.output_defaults(),

@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 from ai_video_studio.captions.ass import build_ass
-from ai_video_studio.captions.model import CaptionSegment, CaptionTrack, remap_to_cuts
+from ai_video_studio.captions.model import CaptionSegment, CaptionTrack, output_captions, remap_to_cuts
 from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import StudioError
@@ -31,6 +31,7 @@ from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, REFRAME_EXPORT_JOB, REFRAME_PREVIEW_JOB
 from ai_video_studio.jobs.render_jobs import RENDER_FRAME_JOB, RENDER_JOB, SMARTCUT_ANALYZE_JOB, output_key
+from ai_video_studio.render.effects import EditEffects
 from ai_video_studio.render.layout import Layout, LayoutError, ResizeSettings, compute_layout, layout_notes
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.smartcut.levels import AudioLevels
@@ -101,6 +102,7 @@ class ProjectController(QObject):
     smartcut_changed = Signal(str)      # media id: cut proposal, settings or applied cuts changed
     smartcut_analysis_finished = Signal(str, object)  # media id, job
     resize_changed = Signal(str)        # media id: Resize & Crop settings changed
+    effects_changed = Signal(str)       # media id: speed and audio effects changed
 
     def __init__(self, services: Services, bridge: JobBridge, parent: QObject | None = None):
         super().__init__(parent)
@@ -680,10 +682,26 @@ class ProjectController(QObject):
         if Path(output).exists() and not overwrite:
             raise StudioError(f"{Path(output).name} already exists.")
 
+    # -- speed and audio effects -------------------------------------------------------
+    def effects(self, media_id: str) -> EditEffects:
+        item = self.media(media_id)
+        return item.effects.copy() if item.effects else EditEffects()
+
+    def set_effects(self, media_id: str, effects: EditEffects) -> None:
+        effects.validate()
+        self.media(media_id).effects = effects.copy()
+        self.project.dirty = True
+        self.effects_changed.emit(media_id)
+        self.dirty_changed.emit(True)
+
     def submit_render(self, media_id: str, output: str, settings: OutputSettings, *, use_cuts: bool = True,
                       burn_captions: bool = False, stage: dict | None = None, canvas: tuple[int, int] | None = None,
-                      overwrite: bool = False, title: str | None = None, preview: bool = False) -> Job:
-        """Queue an edited export. ``stage``/``canvas`` describe resizing (None = source size)."""
+                      overwrite: bool = False, title: str | None = None, preview: bool = False,
+                      use_effects: bool = True) -> Job:
+        """Queue an edited export. ``stage``/``canvas`` describe resizing (None = source size).
+
+        The video's speed and audio effects are included when they are switched on (``use_effects``).
+        """
         item = self.media(media_id)
         if item.status is MediaStatus.MISSING:
             raise StudioError(f"{item.name}: the source file is missing.")
@@ -697,9 +715,11 @@ class ProjectController(QObject):
             raise StudioError("The source file changed after its audio was analysed. Analyse it again in Smart Cut "
                               "before exporting with cuts.")
         out_w, out_h = canvas or (meta.display_width, meta.display_height)
+        effects = self.effects(media_id) if use_effects else EditEffects()
+        effects.validate()
         ass = None
         if burn_captions:
-            segments = self.edited_captions(media_id, keep)
+            segments = output_captions(self.edited_captions(media_id, None), keep, effects.video_factor)
             if not segments:
                 raise StudioError("There are no captions to burn in (none exist, or all are in removed parts).")
             ass = build_ass(segments, item.effective_caption_style, out_w, out_h, title=item.name)
@@ -711,9 +731,22 @@ class ProjectController(QObject):
             "duration": meta.duration, "fps": meta.fps, "has_audio": meta.has_audio,
             "audio_codec": meta.audio_codec, "keep_ranges": [list(r) for r in keep] if keep else None,
             "stage": stage, "ass": ass, "output_settings": settings.to_dict(), "preview": preview,
+            "effects": effects.to_dict() if effects.active else None,
         }
         return self.services.jobs.submit(RENDER_JOB, title or f"Export edited video: {item.name}", payload,
                                          project_id=self.project.id)
+
+    def submit_combined_export(self, media_id: str, output: str, settings: OutputSettings, *, use_cuts: bool,
+                               use_resize: bool, burn_captions: bool, use_effects: bool,
+                               overwrite: bool = False) -> Job:
+        """One export with every chosen operation: Smart Cut cuts, Resize & Crop or Auto Reframe
+        (the Resize & Crop page settings), captions and speed/audio effects."""
+        stage, canvas = None, None
+        if use_resize:
+            stage, canvas, _notes = self.resize_stage(media_id)
+        return self.submit_render(media_id, output, settings, use_cuts=use_cuts, burn_captions=burn_captions,
+                                  stage=stage, canvas=canvas, overwrite=overwrite, use_effects=use_effects,
+                                  title=f"Export final video: {Path(output).name}")
 
     # -- resize & crop ------------------------------------------------------------------
     def resize_settings(self, media_id: str) -> ResizeSettings:

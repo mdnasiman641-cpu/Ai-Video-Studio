@@ -29,10 +29,13 @@ from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir
 from ai_video_studio.jobs.encode import encode_with_fallback, ffmpeg_error, partial_path
 from ai_video_studio.jobs.manager import JobContext
 from ai_video_studio.jobs.models import Job
+from ai_video_studio.captions.ass import build_ass
+from ai_video_studio.captions.model import CaptionSegment, output_captions
 from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.jobs.reframe_jobs import run_tracking_analysis
 from ai_video_studio.reframe.framing import caption_band_from_style, compute_crop_path, resolve_output_size
 from ai_video_studio.reframe.model import ReframeSettings
+from ai_video_studio.render.effects import EditEffects
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.render.pipeline import (
     audio_plan,
@@ -44,6 +47,7 @@ from ai_video_studio.render.pipeline import (
 )
 from ai_video_studio.render.stages import stage_from_payload
 from ai_video_studio.smartcut.levels import AudioLevels, LevelsParser, levels_args
+from ai_video_studio.smartcut.model import SmartCutSettings, build_segments, detect_silences, keep_ranges
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +63,33 @@ def output_key(path: str | Path) -> str:
     return os.path.normcase(os.path.abspath(str(path)))
 
 
+NO_AUDIO = "This video has no audio track, so there is no silence to detect."
+
+
+def analyse_levels(source: Path, duration: float, ffmpeg: Path, ctx: JobContext,
+                   progress_range: tuple[float, float] = (0.0, 1.0)) -> AudioLevels:
+    """Measure the audio levels of ``source`` (Smart Cut analysis)."""
+    parser = LevelsParser()
+    lo, hi = progress_range
+
+    def on_line(line: str) -> None:
+        t = parser.feed(line)
+        if t is not None and duration > 0 and len(parser.peak) % 40 == 0:
+            ctx.report_progress(lo + (hi - lo) * min(0.99, t / duration))
+
+    stat = source.stat()
+    result = run_streaming(levels_args(ffmpeg, str(source)), on_line, cancel_event=ctx.cancel_event)
+    if result.returncode != 0:
+        detail = result.stderr.lower()
+        if "matches no streams" in detail or "does not contain any stream" in detail:
+            raise MediaError(NO_AUDIO)
+        raise MediaError(f"Audio analysis failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
+    if not parser.peak:
+        raise MediaError("The audio track contains no samples.")
+    return AudioLevels(parser.peak, parser.rms, duration or len(parser.peak) * 0.025,
+                       source_size=stat.st_size, source_mtime=round(stat.st_mtime, 3))
+
+
 def make_smartcut_analyze_handler(get_ffmpeg: Callable[[], Path]):
     def handle(job: Job, ctx: JobContext) -> dict:
         p = job.payload
@@ -66,32 +97,67 @@ def make_smartcut_analyze_handler(get_ffmpeg: Callable[[], Path]):
         if not source.is_file():
             raise MediaError(f"Source video not found: {source}")
         if p.get("has_audio") is False:
-            raise MediaError("This video has no audio track, so there is no silence to detect.")
-        duration = float(p.get("duration") or 0)
-        parser = LevelsParser()
-
-        def on_line(line: str) -> None:
-            t = parser.feed(line)
-            if t is not None and duration > 0 and len(parser.peak) % 40 == 0:
-                ctx.report_progress(min(0.99, t / duration))
-
-        stat = source.stat()
-        result = run_streaming(levels_args(get_ffmpeg(), str(source)), on_line, cancel_event=ctx.cancel_event)
-        if result.returncode != 0:
-            detail = result.stderr.lower()
-            if "matches no streams" in detail or "does not contain any stream" in detail:
-                raise MediaError("This video has no audio track, so there is no silence to detect.")
-            raise MediaError(f"Audio analysis failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
-        if not parser.peak:
-            raise MediaError("The audio track contains no samples.")
-        levels = AudioLevels(parser.peak, parser.rms, duration or len(parser.peak) * 0.025,
-                             source_size=stat.st_size, source_mtime=round(stat.st_mtime, 3))
+            raise MediaError(NO_AUDIO)
+        levels = analyse_levels(source, float(p.get("duration") or 0), get_ffmpeg(), ctx)
         return {"media_id": p.get("media_id"), "levels": levels.to_dict()}
 
     return handle
 
 
-def reframe_stage_for(p: dict, ctx: JobContext, ffmpeg: Path, detector_factory=None, vad=None) -> tuple[dict, list[str]]:
+def auto_cut_ranges(p: dict, ctx: JobContext, ffmpeg: Path, progress_range: tuple[float, float]
+                    ) -> tuple[list[tuple[float, float]] | None, list[str]]:
+    """Automatic Smart Cut for a batch video: detect silence and return the keep ranges."""
+    settings = SmartCutSettings.from_dict(p["smartcut_auto"].get("settings"))
+    settings.validate()
+    if not p.get("has_audio", True):
+        return None, ["Smart Cut was skipped: the video has no audio track."]
+    ctx.set_stage("analyzing")
+    duration = float(p.get("duration") or 0)
+    levels = analyse_levels(Path(p["path"]), duration, ffmpeg, ctx, progress_range)
+    duration = duration or levels.duration
+    segments = build_segments(detect_silences(levels, settings, duration), duration, settings.min_keep)
+    ranges = keep_ranges(segments)
+    removed = duration - kept_duration(ranges)
+    if not ranges:
+        raise StudioError("Smart Cut found no sound to keep (the whole video is below the silence threshold).")
+    if removed < 0.05:
+        return None, [f"Smart Cut found no silence below {settings.threshold_db:g} dB."]
+    return ranges, [f"Smart Cut removed {removed:.1f} s of silence."]
+
+
+_filters_cache: dict[str, set[str]] = {}
+
+
+def ffmpeg_filters(ffmpeg: Path) -> set[str]:
+    """Names of the filters this FFmpeg build has (cached per executable)."""
+    key = str(ffmpeg)
+    if key not in _filters_cache:
+        try:
+            result = run_process([key, "-hide_banner", "-filters"], timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return set()
+        names = set()
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and len(parts[0]) <= 4 and "->" in parts[2]:
+                names.add(parts[1])
+        _filters_cache[key] = names
+    return _filters_cache[key]
+
+
+def check_filters(ffmpeg: Path, effects: EditEffects) -> None:
+    available = ffmpeg_filters(ffmpeg)
+    if not available:
+        return  # the list could not be read; FFmpeg itself reports a missing filter
+    missing = sorted(effects.required_filters() - available)
+    if missing:
+        raise StudioError("This FFmpeg build does not include the filter(s) " + ", ".join(missing) +
+                          " needed for the chosen speed or audio settings. Turn those settings off or use "
+                          "a full FFmpeg build.")
+
+
+def reframe_stage_for(p: dict, ctx: JobContext, ffmpeg: Path, detector_factory=None, vad=None,
+                      progress_range: tuple[float, float] = (0.0, 0.5)) -> tuple[dict, list[str]]:
     """Analyse the video and build the Auto Reframe stage (batch items with the Auto Reframe operation)."""
     auto = p["reframe_auto"]
     settings = ReframeSettings.from_dict(auto["settings"])
@@ -100,7 +166,7 @@ def reframe_stage_for(p: dict, ctx: JobContext, ffmpeg: Path, detector_factory=N
     analysis = None
     if settings.tracks_subjects:
         analysis = run_tracking_analysis(auto["analysis"] | {"path": p["path"]}, ffmpeg, ctx, detector_factory, vad,
-                                         progress_range=(0.0, 0.5))
+                                         progress_range=progress_range)
     band = caption_band_from_style(CaptionStyle.from_dict(auto["caption_style"])) if auto.get("caption_style") else None
     width, height = int(auto["analysis"]["width"]), int(auto["analysis"]["height"])
     path = compute_crop_path(analysis, settings, width, height, float(p.get("duration") or 0), caption_band=band)
@@ -126,25 +192,47 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
             raise StudioError(f"{output.name} already exists. Choose another name, or choose to replace it.")
         settings = OutputSettings.from_dict(p.get("output_settings"))
         settings.validate()
+        effects = EditEffects.from_dict(p.get("effects"), strict=True)
+        if effects.active:
+            check_filters(get_ffmpeg(), effects)
         duration = float(p.get("duration") or 0)
         fps = float(p.get("fps") or 0) or None
         ranges = p.get("keep_ranges")
+        notes: list[str] = []
+        start = 0.0
+        if p.get("smartcut_auto") and not ranges:
+            start = 0.2 if p.get("reframe_auto") else 0.3
+            ranges, cut_notes = auto_cut_ranges(p, ctx, get_ffmpeg(), (0.0, start))
+            notes += cut_notes
         if ranges:
             ranges = snap_ranges([tuple(r) for r in ranges], fps, duration or None)
             if not ranges:
                 raise StudioError("Nothing is left after the cuts.")
             if is_full_clip(ranges, duration):
                 ranges = None
-        out_duration = kept_duration(ranges) if ranges else (duration or None)
+        edited_duration = kept_duration(ranges) if ranges else (duration or None)
+        out_duration = effects.output_duration(edited_duration)
         has_audio = bool(p.get("has_audio", True))
-        mode, notes = audio_plan(settings, has_audio, p.get("audio_codec"), bool(ranges))
-        notes += settings.notes(fps)
-        progress_range = (0.0, 1.0)
+        mode, audio_notes = audio_plan(settings, has_audio, p.get("audio_codec"), bool(ranges), effects.changes_audio)
+        notes += audio_notes + settings.notes(fps) + (["Speed and audio: " + ", ".join(effects.summary()) + "."]
+                                                      if effects.summary() else [])
         stage_payload = p.get("stage")
         if p.get("reframe_auto") and not stage_payload:
-            stage_payload, reframe_notes = reframe_stage_for(p, ctx, get_ffmpeg(), detector_factory, vad)
+            stage_payload, reframe_notes = reframe_stage_for(p, ctx, get_ffmpeg(), detector_factory, vad,
+                                                             (start, start + (1 - start) / 2))
             notes += reframe_notes
-            progress_range = (0.5, 1.0)
+            start = start + (1 - start) / 2
+        progress_range = (start, 1.0)
+        ass = p.get("ass")
+        if p.get("captions"):  # captions timed here, after the cuts are known
+            c = p["captions"]
+            segments = output_captions([CaptionSegment.from_dict(d) for d in c["segments"]], ranges,
+                                       effects.video_factor)
+            if segments:
+                ass = build_ass(segments, CaptionStyle.from_dict(c.get("style")), int(c["width"]), int(c["height"]),
+                                title=c.get("title") or "AI Video Studio captions")
+            else:
+                notes.append("No captions are left after the cuts; exported without captions.")
         ctx.set_stage("rendering")
         key = output_key(output)
         with _writing_lock:
@@ -156,12 +244,13 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
             output.parent.mkdir(parents=True, exist_ok=True)
             stage = stage_from_payload(stage_payload, folder, ranges)
             subtitle_file = None
-            if p.get("ass"):
+            if ass:
                 subtitle_file = SUBTITLE_FILE
-                (folder / subtitle_file).write_text(p["ass"], encoding="utf-8")
+                (folder / subtitle_file).write_text(ass, encoding="utf-8")
             graph, _video, audio_label = build_filter_graph(
                 keep_ranges=ranges, has_audio=has_audio and mode != "none", video_stage=stage,
-                subtitle_file=subtitle_file, target_fps=settings.target_fps())
+                subtitle_file=subtitle_file, target_fps=settings.target_fps(), video_filters=effects.video_filters(),
+                source_fps=fps, audio_filters=effects.audio_filters(out_duration) if mode == "filtered" else None)
             ctx.check_cancelled()
 
             def build(encoder, partial: str) -> list[str]:
@@ -176,7 +265,8 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
             remove_tree(folder)
             with _writing_lock:
                 _writing.discard(key)
-        log.info("Render finished", extra={"job_id": job.id, "encoder": codec, "cuts": len(ranges or [])})
+        log.info("Render finished", extra={"job_id": job.id, "encoder": codec, "cuts": len(ranges or []),
+                                           "speed": effects.video_factor})
         return {"media_id": p.get("media_id"), "output": str(output), "encoder": codec,
                 "warnings": warnings + notes, "duration": out_duration, "segments": len(ranges or []) or 1,
                 "batch_id": p.get("batch_id"), "batch_item": p.get("batch_item")}

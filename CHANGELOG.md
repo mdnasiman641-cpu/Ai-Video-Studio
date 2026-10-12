@@ -2,6 +2,52 @@
 
 All notable changes are listed here. Versions follow semantic versioning.
 
+## [Unreleased]
+
+Combined editing, bulk editing with shared settings, caption templates, speed and audio effects.
+Project files become version 6 (new optional keys; version 1-5 files open unchanged).
+
+### Added
+- **Export Final Video** (Edit page): one export, one encode, with any of these switched on:
+  - the Smart Cut cuts;
+  - Resize & Crop or Auto Reframe (Resize & Crop page settings);
+  - burned-in captions;
+  - speed and audio effects.
+  Captions follow the cuts and the speed change.
+- **Speed** (Edit page, Bulk settings):
+  - 0.25×–4×, applied after the cuts and the resize/reframe stage, with a constant frame rate;
+  - linked audio stays in sync, with or without preserved pitch (chained `atempo`, or `asetrate`);
+  - unlinked audio uses its own speed and is cut, or padded with silence, to the video length.
+- **Audio effects:**
+  - volume 0–400%;
+  - noise reduction (`afftdn`);
+  - voice effect: radio, echo, deeper, higher;
+  - bass/treble ±12 dB;
+  - fade in/out;
+  - loudness normalisation (`loudnorm`).
+
+  Each export checks that the FFmpeg build has the filters it needs. Silent videos are exported
+  without audio and a note. Smart Cut and Resize & Crop exports also include a video's effects,
+  and their export dialogs say so.
+- **Bulk Processing:**
+  - Smart Cut silence removal: automatic detection per video inside the job, or the project's
+    reviewed cuts;
+  - a caption style for the whole batch;
+  - speed and audio effects;
+  - "Keep the original frame" (no resizing);
+  - **Apply Shared Settings to All**;
+  - **Preview Selected**: one exact frame with framing and caption style.
+
+  Presets store every parameter. Presets saved by older versions load with these options off.
+- **Captions:**
+  - a visual template grid (built-in and saved presets, drawn with their real style);
+  - new templates: Bold Green, Red Outline, Clean Minimal, Highlight Style, Social Video, Large
+    Readable;
+  - **Apply to Selected Captions** (per-caption style, undoable);
+  - **Apply to All Captions** and **Reset to Default**;
+  - fade-in/fade-out animation (ASS `\fad`), in the editor and in exports.
+- A damaged saved caption or bulk preset gives a clear message instead of an error.
+
 ## [0.7.1] - Unreleased
 
 Fixes the v0.7.0 start-up crash (WinError 448) and prepares acceptance testing on a real Windows PC. No new features; Phase 8 not started.

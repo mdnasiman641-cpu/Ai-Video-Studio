@@ -40,11 +40,20 @@ from ai_video_studio.core.ffmpeg_tools import VideoMetadata
 from ai_video_studio.core.media import format_duration, validate_video_path
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
-from ai_video_studio.jobs.render_jobs import RENDER_JOB
+from ai_video_studio.jobs.render_jobs import RENDER_FRAME_JOB, RENDER_JOB
 from ai_video_studio.reframe.model import ReframeSettings
-from ai_video_studio.render.batch import Batch, BatchItem, build_payload, item_progress, output_name
+from ai_video_studio.render.batch import (
+    Batch,
+    BatchItem,
+    build_payload,
+    frame_preview_payload,
+    item_progress,
+    output_name,
+    output_size,
+)
 from ai_video_studio.render.naming import CONFLICT_POLICIES, path_key, plan_outputs
 from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
+from ai_video_studio.ui.caption_dialogs import FramePreviewDialog
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController, expand_paths
 from ai_video_studio.ui.widgets.common import Card, muted, open_folder, page_title, section_title
 from ai_video_studio.ui.widgets.preset_editor import PresetDialog, PresetEditor
@@ -84,6 +93,13 @@ class BulkPage(QWidget):
         header.setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
         self.customize_button = QPushButton("Customize Selected…")
         self.shared_button = QPushButton("Use Shared Settings")
+        self.all_shared_button = QPushButton("Apply Shared Settings to All")
+        self.all_shared_button.setToolTip("Every video uses the shared settings (removes per-video settings).")
+        self.preview_button = QPushButton("Preview Selected")
+        self.preview_button.setToolTip("Render one frame of the selected video with its settings (framing and "
+                                       "caption style), without exporting the video.")
+        self._preview_job: str | None = None
+        self._preview_notes: list[str] = []
 
         self.preset_combo = QComboBox()
         self.apply_preset_button = QPushButton("Apply")
@@ -91,7 +107,7 @@ class BulkPage(QWidget):
         self.update_preset_button = QPushButton("Update Preset")
         self.rename_preset_button = QPushButton("Rename…")
         self.delete_preset_button = QPushButton("Delete")
-        self.editor = PresetEditor(self.batch.shared)
+        self.editor = PresetEditor(self.batch.shared, caption_presets=self.services.presets)
         self.output_dir = QLineEdit(self.batch.output_dir)
         self.output_dir.setPlaceholderText("Folder for the exported videos")
         self.browse_button = QPushButton("Browse…")
@@ -116,8 +132,10 @@ class BulkPage(QWidget):
         for b in (self.add_button, self.add_folder_button, self.remove_button, self.clear_button):
             tools.addWidget(b)
         tools.addStretch(1)
+        tools.addWidget(self.preview_button)
         tools.addWidget(self.customize_button)
         tools.addWidget(self.shared_button)
+        tools.addWidget(self.all_shared_button)
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
@@ -176,6 +194,8 @@ class BulkPage(QWidget):
         self.clear_button.clicked.connect(self.clear_list)
         self.customize_button.clicked.connect(self.customize_selected)
         self.shared_button.clicked.connect(self.use_shared_for_selected)
+        self.all_shared_button.clicked.connect(self.apply_shared_to_all)
+        self.preview_button.clicked.connect(self.preview_selected)
         self.apply_preset_button.clicked.connect(self.apply_preset)
         self.save_preset_button.clicked.connect(self.save_preset)
         self.update_preset_button.clicked.connect(self.update_preset)
@@ -414,7 +434,8 @@ class BulkPage(QWidget):
         if not items:
             return
         dialog = PresetDialog(self, f"Settings for {items[0].name}" + (f" and {len(items) - 1} more" if len(items) > 1
-                                                                        else ""), self.batch.effective(items[0]))
+                                                                        else ""), self.batch.effective(items[0]),
+                              caption_presets=self.services.presets)
         if dialog.exec() != PresetDialog.DialogCode.Accepted:
             return
         for item in items:
@@ -427,6 +448,38 @@ class BulkPage(QWidget):
             item.override = None
         self.save()
         self.refresh()
+
+    def apply_shared_to_all(self, confirm: bool = True) -> None:
+        custom = [i for i in self.batch.items if i.override is not None]
+        if custom and confirm and QMessageBox.question(
+                self, "Apply Shared Settings to All", f"{len(custom)} video(s) have their own settings. Use the "
+                "shared settings for every video?") != QMessageBox.StandardButton.Yes:
+            return
+        for item in custom:
+            item.override = None
+        self.save()
+        self.refresh()
+        self.summary.setText(f"All {len(self.batch.items)} video(s) use the shared settings.")
+
+    def preview_selected(self) -> Job | None:
+        items = self.selected_items()
+        if not items:
+            return None
+        item = items[0]
+        captions, style = self.captions_for(item)
+        try:
+            payload, notes = frame_preview_payload(item, self.batch.effective(item), captions, style)
+        except StudioError as exc:
+            QMessageBox.warning(self, "Preview", str(exc))
+            return None
+        job = self.services.jobs.submit(RENDER_FRAME_JOB, f"Batch preview frame: {item.name}", payload)
+        self._preview_job, self._preview_notes = job.id, notes
+        self.summary.setText(f"Rendering a preview frame of {item.name}…")
+        return job
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.editor.fill_caption_styles()  # caption presets may have changed on the Captions page
 
     # ------------------------------------------------------------------ status
     def status(self, item: BatchItem) -> tuple[str, float]:
@@ -467,7 +520,7 @@ class BulkPage(QWidget):
         size = "-"
         if meta is not None:
             try:
-                w, h = preset.resize.output_size(meta.display_width, meta.display_height)
+                w, h = output_size(preset, meta)
                 size = f"{meta.display_width}×{meta.display_height} → {w}×{h}"
             except StudioError:
                 size = meta.resolution_text
@@ -523,6 +576,8 @@ class BulkPage(QWidget):
         self.clear_button.setEnabled(bool(self.batch.items))
         self.customize_button.setEnabled(bool(items))
         self.shared_button.setEnabled(any(i.override for i in items))
+        self.all_shared_button.setEnabled(any(i.override for i in self.batch.items))
+        self.preview_button.setEnabled(len(items) == 1 and items[0].metadata is not None and self._preview_job is None)
         self.start_button.setEnabled(any(self.status(i)[0] == "ready" for i in self.batch.items))
         self.pause_button.setEnabled(JobState.QUEUED in states)
         self.resume_button.setEnabled(JobState.HELD in states)
@@ -548,6 +603,16 @@ class BulkPage(QWidget):
             except (OSError, StudioError) as exc:
                 log.warning("Could not read sidecar subtitles", extra={"path": str(srt), "error": str(exc)})
         return None, None
+
+    def reviewed_cuts_for(self, item: BatchItem):
+        """Smart Cut cuts applied to the same video in the open project, if any."""
+        project = self.controller.project
+        if project is None:
+            return None
+        media = next((m for m in project.media if path_key(m.path) == path_key(item.path)), None)
+        if media is None or self.controller.smartcut_is_stale(media):
+            return None
+        return self.controller.applied_cuts(media.id)
 
     def tracking_defaults(self) -> ReframeSettings:
         settings = ReframeSettings()
@@ -597,7 +662,8 @@ class BulkPage(QWidget):
                 payload, notes = build_payload(
                     item, self.batch.effective(item), decision.path, overwrite=decision.action == "replace",
                     batch_id=self.batch.id, captions=captions, caption_style=style,
-                    tracking_defaults=self.tracking_defaults(), models_dir=str(paths.data_dir() / "models"))
+                    tracking_defaults=self.tracking_defaults(), models_dir=str(paths.data_dir() / "models"),
+                    reviewed_cuts=self.reviewed_cuts_for(item))
             except StudioError as exc:
                 failures.append(f"{item.name}: {exc}")
                 item.note = str(exc)
@@ -648,6 +714,16 @@ class BulkPage(QWidget):
         self.refresh()
 
     def _on_job_changed(self, job: Job) -> None:
+        if job.kind == RENDER_FRAME_JOB and job.id == self._preview_job and job.state.is_finished:
+            self._preview_job = None
+            if job.state is JobState.COMPLETED and job.result:
+                self.summary.setText("")
+                note = " ".join(["Framing and caption style as they will be exported."] + self._preview_notes)
+                FramePreviewDialog(job.result["image"], job.result["at"], self, title="Batch Preview",
+                                   note=note).exec()
+            else:
+                self.summary.setText(f"⚠ Preview failed: {job.error or 'cancelled'}")
+            return
         if job.kind == PROBE_JOB and job.payload.get("batch_id") == self.batch.id and job.state.is_finished:
             item = self.batch.find(job.payload.get("batch_item", ""))
             self._probes.pop(job.id, None)

@@ -45,8 +45,9 @@ at runtime, so no media is committed. Tests that need FFmpeg are skipped when it
 - `ai_video_studio/ai/`: provider profiles (`profiles.py`), HTTP client (`client.py`), capability-aware
   router with retries/fallback (`router.py`), usage log (`usage.py`); stdlib HTTP, injectable transport
 - `ai_video_studio/smartcut/`: audio levels (FFmpeg astats) and silence detection / cut lists (no Qt)
-- `ai_video_studio/render/`: export settings, cut/stage/subtitle filter graph (`pipeline.py`), resize
-  layout used by preview and export (`layout.py`), batch presets and payloads, safe output names
+- `ai_video_studio/render/`: export settings, speed and audio effects (`effects.py`), cut/stage/speed/subtitle
+  filter graph (`pipeline.py`), resize layout used by preview and export (`layout.py`), batch presets and
+  payloads, safe output names
 - `ai_video_studio/storage/`: SQLite database, settings, project files and recent projects
 - `ai_video_studio/jobs/`: job model, persistent store, manager (heavy-render limit, held state, stages),
   handlers (`caption_jobs.py`, `reframe_jobs.py`, `render_jobs.py` for Smart Cut analysis and the shared

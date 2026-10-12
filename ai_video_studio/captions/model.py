@@ -12,8 +12,12 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from ai_video_studio.core.errors import StudioError
+
+if TYPE_CHECKING:
+    from ai_video_studio.captions.style import CaptionStyle
 
 MIN_SEGMENT_DURATION = 0.05  # seconds
 DEFAULT_NEW_SEGMENT_DURATION = 2.0
@@ -52,6 +56,7 @@ class CaptionSegment:
     text: str
     id: str = field(default_factory=_new_id)
     words: list[Word] = field(default_factory=list)
+    style: dict | None = None  # this caption's own style (CaptionStyle dict); None = the video's style
 
     def __post_init__(self) -> None:
         self.start, self.end = _ms(self.start), _ms(self.end)
@@ -64,6 +69,8 @@ class CaptionSegment:
         data = {"id": self.id, "start": self.start, "end": self.end, "text": self.text}
         if self.words:
             data["words"] = [w.to_dict() for w in self.words]
+        if self.style:
+            data["style"] = dict(self.style)
         return data
 
     @classmethod
@@ -74,7 +81,14 @@ class CaptionSegment:
             text=str(d.get("text", "")),
             id=str(d.get("id") or _new_id()),
             words=[Word.from_dict(w) for w in d.get("words", [])],
+            style=dict(d["style"]) if isinstance(d.get("style"), dict) else None,
         )
+
+    def style_or(self, default: "CaptionStyle") -> "CaptionStyle":
+        """The style this caption is drawn with."""
+        from ai_video_studio.captions.style import CaptionStyle
+
+        return CaptionStyle.from_dict(self.style, fallback=default) if self.style else default
 
 
 def validate_times(start: float, end: float, duration: float | None = None) -> str | None:
@@ -259,8 +273,8 @@ class CaptionTrack:
             raise CaptionError("The split point is too close to the start or end of the caption")
 
         index = self.index_of(segment_id)
-        a = CaptionSegment(start=seg.start, end=cut, text=text1, id=seg.id, words=first_words)
-        b = CaptionSegment(start=cut, end=seg.end, text=text2, words=second_words)
+        a = CaptionSegment(start=seg.start, end=cut, text=text1, id=seg.id, words=first_words, style=seg.style)
+        b = CaptionSegment(start=cut, end=seg.end, text=text2, words=second_words, style=seg.style)
         self.segments[index:index + 1] = [a, b]
         self.sort()
         self._touch()
@@ -280,6 +294,7 @@ class CaptionTrack:
             text=clean_text(" ".join(p.text for p in parts)),
             id=parts[0].id,
             words=[w for p in parts for w in p.words] if all(p.words for p in parts) else [],
+            style=parts[0].style,
         )
         self.segments[indexes[0]:indexes[-1] + 1] = [merged]
         self._touch()
@@ -389,7 +404,8 @@ def remap_to_cuts(segments: list[CaptionSegment], keep_ranges: list[tuple[float,
             if not words:
                 continue
             text = clean_text("".join(w.text for w in words))
-        result.append(CaptionSegment(start=_ms(span[0]), end=_ms(span[1]), text=text, id=seg.id, words=words))
+        result.append(CaptionSegment(start=_ms(span[0]), end=_ms(span[1]), text=text, id=seg.id, words=words,
+                                     style=seg.style))
     # Mapping is monotonic, but rounding can make neighbours touch or overlap by a millisecond.
     # Captions that did not overlap before must not overlap after remapping.
     originals = {s.id: s for s in segments}
@@ -399,6 +415,29 @@ def remap_to_cuts(segments: list[CaptionSegment], keep_ranges: list[tuple[float,
         if b.start < a.end and oa.end <= ob.start + 1e-6:
             a.end = b.start
     return [s for s in result if s.end - s.start >= MIN_SEGMENT_DURATION]
+
+
+def retime(segments: list[CaptionSegment], speed: float) -> list[CaptionSegment]:
+    """Captions for a video played ``speed`` times faster (times divided by ``speed``)."""
+    if speed <= 0:
+        raise CaptionError("Speed must be positive")
+    if abs(speed - 1.0) < 1e-9:
+        return [CaptionSegment.from_dict(s.to_dict()) for s in segments]
+    result = []
+    for s in segments:
+        words = [Word(_ms(w.start / speed), _ms(w.end / speed), w.text) for w in s.words]
+        seg = CaptionSegment(start=s.start / speed, end=s.end / speed, text=s.text, id=s.id, words=words,
+                             style=s.style)
+        if seg.end - seg.start >= MIN_SEGMENT_DURATION:
+            result.append(seg)
+    return result
+
+
+def output_captions(segments: list[CaptionSegment], keep_ranges: list[tuple[float, float]] | None,
+                    speed: float = 1.0) -> list[CaptionSegment]:
+    """Captions on the exported timeline: Smart Cut cuts first, then the speed change."""
+    edited = remap_to_cuts(segments, keep_ranges) if keep_ranges else segments
+    return retime(edited, speed)
 
 
 # -- time entry ---------------------------------------------------------------

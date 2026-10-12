@@ -40,7 +40,7 @@ from ai_video_studio.render.layout import MODES, PRESETS, Layout, ResizeSettings
 from ai_video_studio.render.pipeline import kept_duration
 from ai_video_studio.ui.caption_dialogs import FramePreviewDialog
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController
-from ai_video_studio.ui.widgets.caption_overlay import paint_captions
+from ai_video_studio.ui.widgets.caption_overlay import paint_segments
 from ai_video_studio.ui.widgets.common import muted, open_folder, page_title
 from ai_video_studio.ui.widgets.output_settings import ExportDialog
 from ai_video_studio.ui.widgets.video_preview import VideoPreview
@@ -108,8 +108,7 @@ class CanvasPreview(QWidget):
             painter.drawText(dst, Qt.AlignmentFlag.AlignCenter, "Play or seek the video to see a frame")
         if page.settings.burn_captions and item is not None and item.captions:
             t = page.preview.position_seconds()
-            texts = [s.text for s in item.captions.active_at(t)]
-            paint_captions(painter, rect, texts, item.effective_caption_style)
+            paint_segments(painter, rect, item.captions.active_at(t), item.effective_caption_style)
         if page.show_safe.isChecked():
             painter.setPen(QPen(SAFE, 1, Qt.PenStyle.DashLine))
             painter.drawRect(rect.adjusted(rect.width() * 0.05, rect.height() * 0.05,
@@ -531,6 +530,9 @@ class ResizePage(QWidget):
         notes = [f"Output {L.out_w}×{L.out_h}, mode: {MODES[self.settings.mode].split(' —')[0]}."]
         if cuts:
             notes.append(f"Smart Cut cuts are applied ({format_duration(kept_duration(cuts))}).")
+        effects = self.controller.effects(self._media_id).summary()
+        if effects:
+            notes.append("Speed and audio (Edit page): " + ", ".join(effects) + ".")
         dialog = ExportDialog(self, "Export Resized Video", item.path, suggested, self.services.output_defaults(),
                               captions_available=bool(item.captions and item.captions.segments),
                               captions_checked=self.settings.burn_captions, notes=notes)

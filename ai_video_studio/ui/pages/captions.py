@@ -53,8 +53,9 @@ from ai_video_studio.ui.caption_dialogs import (
     GenerateCaptionsDialog,
 )
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController
-from ai_video_studio.ui.widgets.caption_overlay import paint_captions
+from ai_video_studio.ui.widgets.caption_overlay import paint_segments
 from ai_video_studio.ui.widgets.caption_style_editor import CaptionStyleEditor
+from ai_video_studio.ui.widgets.caption_templates import CaptionTemplateGrid
 from ai_video_studio.ui.widgets.common import muted, page_title
 from ai_video_studio.ui.widgets.video_preview import VideoPreview
 
@@ -170,7 +171,13 @@ class CaptionsPage(QWidget):
 
         # -- style tab --
         self.preset_combo = QComboBox()
-        self.apply_preset_button = QPushButton("Apply")
+        self.template_grid = CaptionTemplateGrid()
+        self.apply_preset_button = QPushButton("Apply to All Captions")
+        self.apply_selected_button = QPushButton("Apply to Selected Captions")
+        self.apply_selected_button.setToolTip("Give the selected captions (Captions tab) this template's style. "
+                                              "The other captions keep the video's style.")
+        self.reset_style_button = QPushButton("Reset to Default")
+        self.override_info = muted("")
         self.save_preset_button = QPushButton("Save as Preset…")
         self.delete_preset_button = QPushButton("Delete Preset")
         self.preset_to_videos_button = QPushButton("Apply Preset to Videos…")
@@ -179,9 +186,10 @@ class CaptionsPage(QWidget):
         preset_row.addWidget(QLabel("Preset:"))
         preset_row.addWidget(self.preset_combo, 1)
         preset_row.addWidget(self.apply_preset_button)
+        preset_row.addWidget(self.apply_selected_button)
         preset_row2 = QHBoxLayout()
-        for b in (self.save_preset_button, self.delete_preset_button, self.preset_to_videos_button,
-                  self.style_to_videos_button):
+        for b in (self.save_preset_button, self.delete_preset_button, self.reset_style_button,
+                  self.preset_to_videos_button, self.style_to_videos_button):
             preset_row2.addWidget(b)
         preset_row2.addStretch(1)
         self.style_editor = CaptionStyleEditor()
@@ -190,8 +198,13 @@ class CaptionsPage(QWidget):
         style_scroll.setWidget(self.style_editor)
         style_tab = QWidget()
         sl = QVBoxLayout(style_tab)
+        sl.addWidget(muted("Templates — click one, then apply it to all captions or to the selected captions:"))
+        sl.addWidget(self.template_grid)
         sl.addLayout(preset_row)
         sl.addLayout(preset_row2)
+        sl.addWidget(self.override_info)
+        sl.addWidget(muted("The fields below edit the video's caption style (used by every caption without its "
+                           "own style)."))
         sl.addWidget(style_scroll, 1)
 
         self.tabs = QTabWidget()
@@ -231,6 +244,9 @@ class CaptionsPage(QWidget):
         self.preview.position_changed.connect(self._on_position)
         self.style_editor.style_changed.connect(self._on_style_edited)
         self.apply_preset_button.clicked.connect(self.apply_preset)
+        self.apply_selected_button.clicked.connect(self.apply_preset_to_selected)
+        self.reset_style_button.clicked.connect(self.reset_style)
+        self.template_grid.chosen.connect(self._on_template_chosen)
         self.save_preset_button.clicked.connect(self.save_preset)
         self.delete_preset_button.clicked.connect(self.delete_preset)
         self.preset_to_videos_button.clicked.connect(self.apply_preset_to_videos)
@@ -512,8 +528,8 @@ class CaptionsPage(QWidget):
         item = self.current()
         if item is None or item.captions is None:
             return
-        texts = [s.text for s in item.captions.active_at(self.preview.position_seconds())]
-        paint_captions(painter, rect, texts, item.effective_caption_style)
+        paint_segments(painter, rect, item.captions.active_at(self.preview.position_seconds()),
+                       item.effective_caption_style)
 
     # ------------------------------------------------------------------ style & presets
     def _load_style(self) -> None:
@@ -538,7 +554,17 @@ class CaptionsPage(QWidget):
         self.preset_combo.blockSignals(False)
         index = self.preset_combo.findData(current) if current else -1
         self.preset_combo.setCurrentIndex(max(0, index))
+        entries = []
+        for name, builtin in self.services.presets.names():
+            try:
+                entries.append((name, self.services.presets.get(name), builtin))
+            except StudioError as exc:  # a damaged saved preset is listed in the combo only
+                log.warning("Caption preset not shown", extra={"preset": name, "error": str(exc)})
+        self.template_grid.set_templates(entries, self.preset_combo.currentData())
         self._update_buttons()
+
+    def _on_template_chosen(self, name: str) -> None:
+        self.preset_combo.setCurrentIndex(max(0, self.preset_combo.findData(name)))
 
     def _preset_style(self) -> CaptionStyle | None:
         name = self.preset_combo.currentData()
@@ -551,11 +577,46 @@ class CaptionsPage(QWidget):
             return None
 
     def apply_preset(self) -> None:
+        """Apply the template to every caption of the video (captions with their own style included)."""
         style = self._preset_style()
         item = self.current()
         if style and item:
+            self._clear_caption_styles(item)
             self.controller.set_caption_style([item.id], style)
-            self.status.setText(f"Applied preset “{self.preset_combo.currentData()}”.")
+            self.status.setText(f"Applied “{self.preset_combo.currentData()}” to all captions.")
+
+    def _clear_caption_styles(self, item) -> None:
+        if item.captions and any(s.style for s in item.captions.segments):
+            def clear(t: CaptionTrack) -> None:
+                for seg in t.segments:
+                    seg.style = None
+            self._edit(clear)
+
+    def apply_preset_to_selected(self) -> None:
+        style = self._preset_style()
+        ids = set(self.selected_ids())
+        if style is None or not ids:
+            self.status.setText("Select captions on the Captions tab first.")
+            return
+
+        def set_style(t: CaptionTrack) -> None:
+            for seg in t.segments:
+                if seg.id in ids:
+                    seg.style = style.to_dict()
+        if self._edit(set_style):
+            self.status.setText(f"Applied “{self.preset_combo.currentData()}” to {len(ids)} caption(s). "
+                                "Undo is available.")
+
+    def reset_style(self) -> None:
+        item = self.current()
+        if item is None:
+            return
+        if QMessageBox.question(self, "Reset to Default", "Use the default caption style for every caption of this "
+                                "video? Captions with their own style are reset too.") != QMessageBox.StandardButton.Yes:
+            return
+        self._clear_caption_styles(item)
+        self.controller.set_caption_style([item.id], CaptionStyle())
+        self.status.setText("Caption style reset to the default.")
 
     def save_preset(self) -> None:
         name, ok = QInputDialog.getText(self, "Save Caption Preset", "Preset name:")
@@ -901,6 +962,11 @@ class CaptionsPage(QWidget):
         name = self.preset_combo.currentData()
         builtin = dict(self.services.presets.names()).get(name, True) if name else True
         self.delete_preset_button.setEnabled(not builtin)
+        own = sum(1 for seg in item.captions.segments if seg.style) if item and item.captions else 0
+        self.override_info.setText(f"{own} caption(s) have their own style." if own else "")
+        self.override_info.setVisible(bool(own))
+        self.apply_selected_button.setEnabled(bool(item and item.captions and self.selected_ids()))
+        self.reset_style_button.setEnabled(item is not None)
         for w in (self.apply_preset_button, self.style_editor, self.save_preset_button, self.style_to_videos_button):
             w.setEnabled(has_item)
         self.preset_to_videos_button.setEnabled(bool(self.controller.project and self.controller.project.media))

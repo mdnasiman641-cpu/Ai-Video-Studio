@@ -27,7 +27,9 @@ PROJECT_FORMAT = "ai-video-studio-project"
 #       analyses may contain speech, mouth movement and appearance data
 #   5 - Phases 4-5: per-media "smart_cut" (audio levels, cut proposal, applied cuts) and
 #       "resize" (output canvas settings); both optional, so version 1-4 files load unchanged
-PROJECT_VERSION = 5
+#   6 - per-media "effects" (speed and audio effects) and per-caption "style" (both optional,
+#       so version 1-5 files load unchanged)
+PROJECT_VERSION = 6
 
 
 @dataclass

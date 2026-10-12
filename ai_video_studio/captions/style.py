@@ -44,6 +44,8 @@ class CaptionStyle:
     background_padding: float = 12.0
     max_chars_per_line: int = 32
     max_lines: int = 2
+    fade_in_ms: int = 0            # caption animation: fade in/out (ASS \fad), 0 = off
+    fade_out_ms: int = 0
 
     def validate(self) -> None:
         errors = []
@@ -73,6 +75,8 @@ class CaptionStyle:
             errors.append("Characters per line must be between 8 and 120")
         if not 1 <= self.max_lines <= 5:
             errors.append("Lines must be between 1 and 5")
+        if not 0 <= self.fade_in_ms <= 2000 or not 0 <= self.fade_out_ms <= 2000:
+            errors.append("Fade-in and fade-out must be between 0 and 2000 ms")
         if errors:
             raise StyleError("; ".join(errors))
 
@@ -80,9 +84,10 @@ class CaptionStyle:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict | None) -> "CaptionStyle":
+    def from_dict(cls, data: dict | None, fallback: "CaptionStyle | None" = None) -> "CaptionStyle":
+        """Read a stored style; damaged data gives ``fallback`` (default: the default style)."""
         if not data:
-            return cls()
+            return fallback or cls()
         known = {f.name: f.type for f in fields(cls)}
         values = {}
         defaults = cls()
@@ -94,11 +99,11 @@ class CaptionStyle:
                 values[key] = type(default)(value)
             except (TypeError, ValueError):
                 continue
-        style = cls(**values)
         try:
+            style = cls(**values)
             style.validate()
-        except StyleError:
-            return cls()  # damaged style data falls back to defaults rather than breaking the project
+        except (StyleError, TypeError, ValueError):
+            return fallback or cls()  # damaged style data falls back rather than breaking the project
         return style
 
     def scale(self, video_height: int) -> float:
@@ -111,6 +116,17 @@ BUILTIN_PRESETS: dict[str, CaptionStyle] = {
     "Boxed": CaptionStyle(outline_width=0, shadow_offset=0, background=True, background_opacity=70),
     "Vertical Center": CaptionStyle(font_size=80, vertical="middle", outline_width=5, max_chars_per_line=20),
     "Subtle Top": CaptionStyle(font_size=48, bold=False, vertical="top", margin_v=6, outline_width=2),
+    "Bold Green": CaptionStyle(font_size=72, text_color="#39FF6A", outline_width=4, margin_v=12),
+    "Red Outline": CaptionStyle(font_size=68, outline_color="#E0182D", outline_width=5, shadow_opacity=40),
+    "Clean Minimal": CaptionStyle(font_size=52, bold=False, outline_width=0, shadow_offset=2, shadow_opacity=70,
+                                  max_chars_per_line=40),
+    "Highlight Style": CaptionStyle(font_size=64, text_color="#111111", outline_width=0, shadow_offset=0,
+                                    background=True, background_color="#FFE600", background_opacity=100,
+                                    background_padding=10),
+    "Social Video": CaptionStyle(font_size=84, vertical="middle", outline_width=6, shadow_offset=3,
+                                 max_chars_per_line=18, fade_in_ms=150, fade_out_ms=150),
+    "Large Readable": CaptionStyle(font_size=90, outline_width=5, background=True, background_opacity=55,
+                                   max_chars_per_line=24, margin_v=10),
 }
 
 

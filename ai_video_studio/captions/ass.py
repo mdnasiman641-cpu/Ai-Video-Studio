@@ -68,6 +68,10 @@ def _style_line(name: str, style: CaptionStyle, width: int, height: int, *, box:
     return "Style: " + ",".join(fields)
 
 
+def _box_name(style_name: str) -> str:
+    return "Box" if style_name == "Default" else style_name + "Box"
+
+
 def build_ass(segments: list[CaptionSegment], style: CaptionStyle, width: int, height: int,
               title: str = "AI Video Studio captions") -> str:
     style.validate()
@@ -85,19 +89,30 @@ def build_ass(segments: list[CaptionSegment], style: CaptionStyle, width: int, h
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding",
-        _style_line("Default", style, width, height, box=False),
     ]
-    if style.background:
-        header.append(_style_line("Box", style, width, height, box=True))
+    # Captions with their own style (applied to selected captions) get their own ASS style.
+    styles: dict[str, tuple[str, CaptionStyle]] = {}
+    for seg in segments:
+        if seg.style:
+            key = repr(sorted(seg.style.items()))
+            if key not in styles:
+                styles[key] = (f"S{len(styles) + 1}", seg.style_or(style))
+    for name, s in [("Default", style)] + list(styles.values()):
+        header.append(_style_line(name, s, width, height, box=False))
+        if s.background:
+            header.append(_style_line(_box_name(name), s, width, height, box=True))
     header += ["", "[Events]",
                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
     events = []
     for seg in sorted(segments, key=lambda s: (s.start, s.end)):
-        text = r"\N".join(escape_ass_text(line) for line in caption_lines(seg.text, style))
+        name, s = styles[repr(sorted(seg.style.items()))] if seg.style else ("Default", style)
+        text = r"\N".join(escape_ass_text(line) for line in caption_lines(seg.text, s))
         if not text:
             continue
+        if s.fade_in_ms or s.fade_out_ms:
+            text = f"{{\\fad({int(s.fade_in_ms)},{int(s.fade_out_ms)})}}" + text
         start, end = ass_time(seg.start), ass_time(seg.end)
-        if style.background:
-            events.append(f"Dialogue: 0,{start},{end},Box,,0,0,0,,{text}")
-        events.append(f"Dialogue: 1,{start},{end},Default,,0,0,0,,{text}")
+        if s.background:
+            events.append(f"Dialogue: 0,{start},{end},{_box_name(name)},,0,0,0,,{text}")
+        events.append(f"Dialogue: 1,{start},{end},{name},,0,0,0,,{text}")
     return "\n".join(header + events) + "\n"
