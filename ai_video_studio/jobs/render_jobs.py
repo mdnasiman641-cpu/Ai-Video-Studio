@@ -25,7 +25,8 @@ from ai_video_studio.core import paths
 from ai_video_studio.core.errors import MediaError, StudioError
 from ai_video_studio.core.fs import remove_tree
 from ai_video_studio.core.process import run_process, run_streaming
-from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir
+from ai_video_studio.captions.models import ModelMissingError
+from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir, transcribe_video
 from ai_video_studio.jobs.encode import encode_with_fallback, ffmpeg_error, partial_path
 from ai_video_studio.jobs.manager import JobContext
 from ai_video_studio.jobs.models import Job
@@ -180,7 +181,38 @@ def reframe_stage_for(p: dict, ctx: JobContext, ffmpeg: Path, detector_factory=N
     return stage, notes
 
 
-def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, vad=None):
+def auto_captions(p: dict, job: Job, ctx: JobContext, ffmpeg: Path, model_factory, cuda_devices,
+                  progress_range: tuple[float, float]) -> tuple[list[dict], list[str]]:
+    """Transcribe a batch video with the Captions page's Whisper transcription (source timeline)."""
+    if not p.get("has_audio", True):
+        raise MediaError("Captions cannot be generated: this video has no audio track.")
+    ctx.set_stage("analyzing")
+    folder = paths.temp_dir() / f"job-{job.id}-captions"
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        result = transcribe_video(p["captions_auto"] | {"path": p["path"], "duration": p.get("duration"),
+                                                        "allow_download": False},
+                                  ctx, ffmpeg, folder, model_factory, cuda_devices, progress_range)
+    except ModelMissingError as exc:
+        model = p["captions_auto"].get("model", "small")
+        raise ModelMissingError(
+            f"Automatic captions need the Whisper model '{model}', which is not on this computer (batches never "
+            "download models). Download it in Settings → Speech recognition models, or choose an installed local "
+            "model folder in Settings, then use Retry Failed.") from exc
+    except StudioError as exc:
+        raise StudioError(f"Automatic captions failed: {exc}") from exc
+    finally:
+        remove_tree(folder)
+    segments = [s.to_dict() for s in result.track.segments]
+    if not segments:
+        raise MediaError("Automatic captions failed: no speech was recognised, so there are no captions to burn "
+                         "in. Turn off automatic captions for this video or check its audio.")
+    return segments, [f"{len(segments)} caption(s) generated ({result.language}, {result.device})."] + list(
+        result.warnings)
+
+
+def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, vad=None, model_factory=None,
+                        cuda_devices: int | None = None):
     def handle(job: Job, ctx: JobContext) -> dict:
         p = job.payload
         source, output = Path(p["path"]), Path(p["output"])
@@ -200,9 +232,16 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
         ranges = p.get("keep_ranges")
         notes: list[str] = []
         start = 0.0
+        caption_segments = (p.get("captions") or {}).get("segments")
+        if p.get("captions_auto"):  # generated here, on the source timeline; timed below with the cuts
+            start = 0.4
+            caption_segments, caption_notes = auto_captions(p, job, ctx, get_ffmpeg(), model_factory, cuda_devices,
+                                                            (0.0, start))
+            notes += caption_notes
         if p.get("smartcut_auto") and not ranges:
-            start = 0.2 if p.get("reframe_auto") else 0.3
-            ranges, cut_notes = auto_cut_ranges(p, ctx, get_ffmpeg(), (0.0, start))
+            cut_end = start + (0.2 if p.get("reframe_auto") else 0.3) * (1 - start)
+            ranges, cut_notes = auto_cut_ranges(p, ctx, get_ffmpeg(), (start, cut_end))
+            start = cut_end
             notes += cut_notes
         if ranges:
             ranges = snap_ranges([tuple(r) for r in ranges], fps, duration or None)
@@ -224,13 +263,16 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
             start = start + (1 - start) / 2
         progress_range = (start, 1.0)
         ass = p.get("ass")
-        if p.get("captions"):  # captions timed here, after the cuts are known
+        if p.get("captions"):  # captions timed here, after the cuts are known (cuts, then speed: once)
             c = p["captions"]
-            segments = output_captions([CaptionSegment.from_dict(d) for d in c["segments"]], ranges,
+            segments = output_captions([CaptionSegment.from_dict(d) for d in caption_segments or []], ranges,
                                        effects.video_factor)
             if segments:
                 ass = build_ass(segments, CaptionStyle.from_dict(c.get("style")), int(c["width"]), int(c["height"]),
                                 title=c.get("title") or "AI Video Studio captions")
+            elif p.get("captions_auto"):  # captions are required: never export without them
+                raise StudioError("Automatic captions: every caption is inside a part removed by Smart Cut, so "
+                                  "there are no captions to burn in.")
             else:
                 notes.append("No captions are left after the cuts; exported without captions.")
         ctx.set_stage("rendering")

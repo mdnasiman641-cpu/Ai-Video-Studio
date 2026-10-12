@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ai_video_studio.captions.models import installed_path
 from ai_video_studio.captions.srt import read_srt_file
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import StudioError
@@ -621,6 +622,30 @@ class BulkPage(QWidget):
             return None
         return self.controller.applied_cuts(media.id)
 
+    def transcription_settings(self) -> dict:
+        """Whisper settings for automatic captions: the same as Generate Captions on the Captions page."""
+        settings = self.services.settings
+        return {"model": settings.get("whisper_model"), "language": settings.get("transcription_language"),
+                "device": settings.get("transcription_device"),
+                "model_path": settings.get("whisper_model_dir") or None,
+                "models_dir": str(paths.data_dir() / "models"), "max_chars": settings.get("caption_max_chars"),
+                "max_seconds": settings.get("caption_max_seconds")}
+
+    def missing_whisper_model(self) -> str | None:
+        """Why automatic captions cannot run now (no installed model), or None."""
+        t = self.transcription_settings()
+        if t["model_path"]:
+            return None
+        try:
+            installed = installed_path(t["model"]) is not None
+        except OSError:
+            installed = False
+        if installed:
+            return None
+        return (f"Automatic captions use the Whisper model '{t['model']}' (Settings), which is not on this "
+                "computer. Batches never download models: download it in Settings → Speech recognition models, "
+                "or choose an installed local model folder in Settings, then start the batch again.")
+
     def tracking_defaults(self) -> ReframeSettings:
         settings = ReframeSettings()
         for key, name in REFRAME_DEFAULT_KEYS.items():
@@ -653,6 +678,12 @@ class BulkPage(QWidget):
         if problems:
             QMessageBox.warning(self, "Start Batch", "Fix these settings first:\n\n" + "\n".join(problems))
             return []
+        if any(self.batch.effective(i).auto_captions and self.batch.effective(i).resize.burn_captions
+               for i in ready):
+            reason = self.missing_whisper_model()
+            if reason:
+                QMessageBox.warning(self, "Start Batch", reason)
+                return []
         busy = set(self.controller.active_outputs())
         sources = {path_key(i.path) for i in self.batch.items}
         if self.controller.project is not None:
@@ -670,7 +701,7 @@ class BulkPage(QWidget):
                     item, self.batch.effective(item), decision.path, overwrite=decision.action == "replace",
                     batch_id=self.batch.id, captions=captions, caption_style=style,
                     tracking_defaults=self.tracking_defaults(), models_dir=str(paths.data_dir() / "models"),
-                    reviewed_cuts=self.reviewed_cuts_for(item))
+                    reviewed_cuts=self.reviewed_cuts_for(item), transcription=self.transcription_settings())
             except StudioError as exc:
                 failures.append(f"{item.name}: {exc}")
                 item.note = str(exc)

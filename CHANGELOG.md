@@ -58,6 +58,15 @@ Project files become version 6 (new optional keys; version 1-5 files open unchan
   - **Apply to Selected Captions** (per-caption style, undoable);
   - **Apply to All Captions** and **Reset to Default**;
   - fade-in/fade-out animation (ASS `\fad`), in the editor and in exports.
+- **Bulk Processing: Generate captions automatically.** With burn-in on, each video's export job
+  transcribes that video with the Captions page's Whisper transcription. It uses the model,
+  language, device and caption length from Settings, and needs no project captions or `.srt` file.
+  The captions are then timed after Smart Cut and speed (once), styled, and burned in, in the same
+  single export.
+  - A failure, or no recognised speech, fails only that video's job with the reason; Retry Failed
+    re-runs it.
+  - Start Batch refuses with an explanation when the Whisper model is not installed. Models are
+    never downloaded by a batch.
 - A damaged saved caption or bulk preset gives a clear message instead of an error.
 
 ## [0.7.1] - Unreleased

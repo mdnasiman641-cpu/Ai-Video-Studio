@@ -260,3 +260,25 @@ def test_bulk_apply_to_all_and_preview(qtbot, window, tmp_path, monkeypatch):
     assert job.kind == RENDER_FRAME_JOB and job.payload["stage"]["layout"]["out_w"] == 160
     qtbot.waitUntil(lambda: bool(shown), timeout=30000)
     assert shown == [f"Batch Preview at {job.payload['at']:.2f} s"]
+
+
+def test_bulk_automatic_captions_option_and_missing_model(qtbot, window, tmp_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _p, _t, text, *a, **k: warnings.append(text))
+    window.navigate("Bulk Processing")
+    page = window.bulk_page
+    editor = page.editor
+    assert not editor.auto_captions.isEnabled()  # only with burn-in
+    editor.burn.setChecked(True)
+    editor.auto_captions.setChecked(True)
+    page._on_shared_changed()
+    assert page.batch.shared.auto_captions and page.batch.shared.resize.burn_captions
+    folder = tmp_path / "in"
+    folder.mkdir()
+    page.add_paths([str(make_sample_video(folder / "a.mp4", seconds=1.0))])
+    qtbot.waitUntil(lambda: page.batch.items[0].metadata is not None, timeout=20000)
+    page.batch.output_dir = str(tmp_path / "out")
+    assert page.start() == []  # nothing is queued: the model is not installed and is never downloaded
+    assert "Whisper model 'small'" in warnings[-1] and "Speech recognition models" in warnings[-1]
+    t = page.transcription_settings()
+    assert t["model"] == window.services.settings.get("whisper_model") and t["device"] in ("auto", "cpu", "cuda")

@@ -65,50 +65,85 @@ def extract_audio(ffmpeg: Path, source: str, output_wav: str, duration: float | 
         raise MediaError(f"Audio extraction failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
 
 
+def transcribe_video(p: dict, ctx: JobContext, ffmpeg: Path, folder: Path, model_factory=None,
+                     cuda_devices: int | None = None, progress_range: tuple[float, float] = (0.0, 1.0)):
+    """Transcribe the video ``p["path"]`` with the settings in ``p`` (a transcription payload).
+
+    Used by the Captions page's transcription job and by Bulk Processing exports with automatic
+    captions. A model that is not downloaded is only downloaded with ``p["allow_download"]``.
+    """
+    options = TranscriptionOptions(
+        model=p.get("model", "small"),
+        language=p.get("language", "auto"),
+        device=p.get("device", "auto"),
+        models_dir=p.get("models_dir") or str(paths.data_dir() / "models"),
+        model_path=p.get("model_path") or None,
+        max_chars=int(p.get("max_chars", 42)),
+        max_duration=float(p.get("max_seconds", 6)),
+    )
+    options.validate()
+    if not Path(p["path"]).is_file():
+        raise MediaError(f"Source video not found: {p['path']}")
+    lo, hi = progress_range
+    start = 0.0
+    if not options.model_path and model_factory is None:
+        # Use a downloaded model folder; never download without the user's consent.
+        # (A custom model factory, as in tests, loads models by name itself.)
+        model_folder = installed_path(options.model)
+        if model_folder is None:
+            spec = WHISPER_MODELS[options.model]
+            if not p.get("allow_download"):
+                raise ModelMissingError(
+                    f"The Whisper model '{options.model}' (about {spec.approx_mb} MB) is not downloaded yet. "
+                    f"Generate Captions asks before downloading it, or download it in Settings → Speech "
+                    f"recognition models.")
+            model_folder = download_model(options.model, progress=lambda f, _text: ctx.report_progress(
+                lo + (hi - lo) * 0.4 * f), check_cancelled=ctx.check_cancelled)
+            start = 0.4
+        options.model_path = str(model_folder)
+    span = 1.0 - start
+
+    def report(f: float) -> None:
+        ctx.report_progress(lo + (hi - lo) * f)
+
+    wav = folder / "audio.wav"
+    extract_audio(ffmpeg, p["path"], str(wav), p.get("duration"), _Scaled(ctx, report),
+                  weight=start + 0.1 * span)
+    report(start + 0.1 * span)
+    result = transcribe_file(
+        str(wav), options,
+        progress=lambda f: report(start + 0.1 * span + 0.9 * span * f),
+        check_cancelled=ctx.check_cancelled,
+        model_factory=model_factory,
+        cuda_devices=cuda_devices,
+    )
+    try:
+        wav.unlink()
+    except OSError:
+        pass
+    return result
+
+
+class _Scaled:
+    """A job context whose progress is mapped into a part of the job's progress."""
+
+    def __init__(self, ctx: JobContext, report):
+        self._ctx, self._report = ctx, report
+        self.cancel_event = ctx.cancel_event
+
+    def report_progress(self, fraction: float) -> None:
+        self._report(fraction)
+
+    def check_cancelled(self) -> None:
+        self._ctx.check_cancelled()
+
+
 def make_transcribe_handler(get_ffmpeg: Callable[[], Path], model_factory=None, cuda_devices: int | None = None):
     def handle(job: Job, ctx: JobContext) -> dict:
         p = job.payload
-        options = TranscriptionOptions(
-            model=p.get("model", "small"),
-            language=p.get("language", "auto"),
-            device=p.get("device", "auto"),
-            models_dir=p.get("models_dir") or str(paths.data_dir() / "models"),
-            model_path=p.get("model_path") or None,
-            max_chars=int(p.get("max_chars", 42)),
-            max_duration=float(p.get("max_seconds", 6)),
-        )
-        options.validate()
-        if not Path(p["path"]).is_file():
-            raise MediaError(f"Source video not found: {p['path']}")
-        start = 0.0
-        if not options.model_path and model_factory is None:
-            # Use a downloaded model folder; never download without the user's consent.
-            # (A custom model factory, as in tests, loads models by name itself.)
-            folder = installed_path(options.model)
-            if folder is None:
-                spec = WHISPER_MODELS[options.model]
-                if not p.get("allow_download"):
-                    raise ModelMissingError(
-                        f"The Whisper model '{options.model}' (about {spec.approx_mb} MB) is not downloaded yet. "
-                        f"Generate Captions asks before downloading it, or download it in Settings → Speech "
-                        f"recognition models.")
-                folder = download_model(options.model, progress=lambda f, _text: ctx.report_progress(0.4 * f),
-                                        check_cancelled=ctx.check_cancelled)
-                start = 0.4
-            options.model_path = str(folder)
-        span = 1.0 - start
         folder = job_temp_dir(job)
-        wav = folder / "audio.wav"
         try:
-            extract_audio(get_ffmpeg(), p["path"], str(wav), p.get("duration"), ctx, weight=start + 0.1 * span)
-            ctx.report_progress(start + 0.1 * span)
-            result = transcribe_file(
-                str(wav), options,
-                progress=lambda f: ctx.report_progress(start + 0.1 * span + 0.9 * span * f),
-                check_cancelled=ctx.check_cancelled,
-                model_factory=model_factory,
-                cuda_devices=cuda_devices,
-            )
+            result = transcribe_video(p, ctx, get_ffmpeg(), folder, model_factory, cuda_devices)
         finally:
             remove_tree(folder)
         if p.get("model") and not p.get("model_path"):

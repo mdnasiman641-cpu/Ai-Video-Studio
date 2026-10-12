@@ -329,3 +329,27 @@ def test_edit_page_settings_convert_to_bulk_settings():
     with pytest.raises(BatchError, match="Batch Resize"):  # a manual crop region is chosen per video
         preset_from_edit(ResizeSettings(mode="crop"), use_cuts=False, burn_captions=False, **common)
     assert ResizeSettings.from_dict({"preset": "1080x1080"}).enabled  # older saved settings
+
+
+def test_automatic_captions_payload_never_uses_other_captions():
+    from ai_video_studio.render.batch import BatchError
+
+    preset = RenderPreset(resize=ResizeSettings(preset="1080x1920", mode="blur", burn_captions=True),
+                          auto_captions=True, caption_style=BUILTIN_PRESETS["Social Video"])
+    assert RenderPreset.from_dict(preset.to_dict()).auto_captions
+    assert not RenderPreset.from_dict({"operation": "resize"}).auto_captions  # older presets
+    item = BatchItem("/v/a.mp4", metadata=META)
+    whisper = {"model": "base", "language": "auto", "device": "auto", "model_path": None}
+    payload, notes = build_payload(item, preset, Path("/o/a.mp4"), overwrite=False, batch_id="b",
+                                   captions=[CaptionSegment(0, 1, "someone else's")], caption_style=None,
+                                   tracking_defaults=ReframeSettings(), models_dir="/m", transcription=whisper)
+    assert payload["captions_auto"] == whisper and payload["captions"]["segments"] == []
+    assert payload["captions"]["style"] == BUILTIN_PRESETS["Social Video"].to_dict() and not notes
+    with pytest.raises(BatchError):
+        build_payload(item, preset, Path("/o/a.mp4"), overwrite=False, batch_id="b", captions=None,
+                      caption_style=None, tracking_defaults=ReframeSettings(), models_dir="/m")
+    preset.resize.burn_captions = False  # automatic captions only matter with burn-in
+    payload, _ = build_payload(item, preset, Path("/o/a.mp4"), overwrite=False, batch_id="b", captions=None,
+                               caption_style=None, tracking_defaults=ReframeSettings(), models_dir="/m",
+                               transcription=whisper)
+    assert payload["captions_auto"] is None and payload["captions"] is None

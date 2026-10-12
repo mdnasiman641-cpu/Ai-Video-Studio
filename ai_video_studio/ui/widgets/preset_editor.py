@@ -71,6 +71,10 @@ class PresetEditor(QWidget):
         self.blur = QSpinBox()
         self.blur.setRange(1, 60)
         self.burn = QCheckBox("Burn in captions (from the project, or a .srt file with the same name)")
+        self.auto_captions = QCheckBox("Generate captions automatically (Whisper)")
+        self.auto_captions.setToolTip("Each video is transcribed in its own export job with the model, language and "
+                                      "device from Settings, like Generate Captions on the Captions page. No project "
+                                      "captions or .srt files are needed.")
         self.caption_style = QComboBox()
         self.caption_style.setToolTip("Caption template for every video in the batch, or each video's own style "
                                       "(Captions page).")
@@ -113,6 +117,7 @@ class PresetEditor(QWidget):
         cap = QGroupBox("Captions")
         capf = QFormLayout(cap)
         capf.addRow("", self.burn)
+        capf.addRow("", self.auto_captions)
         capf.addRow("Caption style:", self.caption_style)
         enc = QGroupBox("Encoding")
         QVBoxLayout(enc).addWidget(self.output)
@@ -132,6 +137,7 @@ class PresetEditor(QWidget):
             box.valueChanged.connect(self._emit)
         self.burn.toggled.connect(self._emit)
         self.smart_cut.toggled.connect(self._emit)
+        self.auto_captions.toggled.connect(self._emit)
         self.effects.changed.connect(self._emit)
         self.template.editingFinished.connect(self._emit)
         self.color_button.clicked.connect(self._choose_color)
@@ -167,6 +173,7 @@ class PresetEditor(QWidget):
             self._background = p.resize.background
             self.output.set_settings(p.output)
             self.smart_cut.setChecked(p.smart_cut)
+            self.auto_captions.setChecked(p.auto_captions)
             self._cut_settings = SmartCutSettings.from_dict(p.smart_cut_settings.to_dict())
             self.threshold.setValue(self._cut_settings.threshold_db)
             self.min_silence.setValue(self._cut_settings.min_silence)
@@ -211,6 +218,7 @@ class PresetEditor(QWidget):
                               tracking_mode=self.tracking.currentData(), output=self.output.settings(),
                               filename_template=self.template.text().strip(), smart_cut=self.smart_cut.isChecked(),
                               smart_cut_settings=cut_settings, caption_style=self.selected_caption_style(),
+                              auto_captions=self.auto_captions.isChecked(),
                               effects=self.effects.effects())
         preset.validate()
         return preset
@@ -226,6 +234,7 @@ class PresetEditor(QWidget):
         for w in (self.threshold, self.min_silence):
             w.setEnabled(self.smart_cut.isChecked())
         self.caption_style.setEnabled(self.burn.isChecked())
+        self.auto_captions.setEnabled(self.burn.isChecked())
         self.tracking.setEnabled(reframe)
         mode = self.mode.currentData()
         self.color_button.setEnabled(not reframe and not original and mode in ("fit", "custom"))

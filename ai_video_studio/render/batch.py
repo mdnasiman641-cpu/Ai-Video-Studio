@@ -54,6 +54,7 @@ class RenderPreset:
     smart_cut: bool = False              # remove silence (automatic detection, or the project's reviewed cuts)
     smart_cut_settings: SmartCutSettings = field(default_factory=SmartCutSettings)
     caption_style: CaptionStyle | None = None  # None = each video's own caption style
+    auto_captions: bool = False          # burn-in: generate each video's captions with Whisper in its job
     effects: EditEffects = field(default_factory=EditEffects)
 
     def validate(self) -> None:
@@ -82,7 +83,7 @@ class RenderPreset:
                 "output": self.output.to_dict(), "filename_template": self.filename_template,
                 "smart_cut": self.smart_cut, "smart_cut_settings": self.smart_cut_settings.to_dict(),
                 "caption_style": self.caption_style.to_dict() if self.caption_style else None,
-                "effects": self.effects.to_dict()}
+                "auto_captions": self.auto_captions, "effects": self.effects.to_dict()}
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "RenderPreset":
@@ -98,7 +99,7 @@ class RenderPreset:
                    filename_template=d.get("filename_template", "{original_name}_{resolution}"),
                    smart_cut=bool(d.get("smart_cut", False)), smart_cut_settings=cut_settings,
                    caption_style=CaptionStyle.from_dict(d["caption_style"]) if d.get("caption_style") else None,
-                   effects=EditEffects.from_dict(d.get("effects")))
+                   auto_captions=bool(d.get("auto_captions", False)), effects=EditEffects.from_dict(d.get("effects")))
 
     def copy(self) -> "RenderPreset":
         return RenderPreset.from_dict(json.loads(json.dumps(self.to_dict())))
@@ -330,11 +331,15 @@ def output_name(preset: RenderPreset, item: BatchItem, index: int, preset_name: 
 def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwrite: bool, batch_id: str,
                   captions: list[CaptionSegment] | None, caption_style: CaptionStyle | None,
                   tracking_defaults: ReframeSettings, models_dir: str,
-                  reviewed_cuts: list[tuple[float, float]] | None = None) -> tuple[dict, list[str]]:
+                  reviewed_cuts: list[tuple[float, float]] | None = None,
+                  transcription: dict | None = None) -> tuple[dict, list[str]]:
     """The ``render_video`` payload for one batch video and notes for the user.
 
     ``reviewed_cuts``: the video's Smart Cut cuts applied in the open project; with Smart Cut on
     they are used instead of automatic detection.
+    ``transcription``: Whisper settings (model, language, device, model folder, caption length) for
+    automatic captions; the job transcribes this video itself (``captions_auto``), so captions never
+    come from another video and need no project or .srt file.
     """
     preset.validate()
     meta = item.metadata
@@ -344,7 +349,12 @@ def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwr
     w, h = output_size(preset, meta)
     style = preset.caption_style or caption_style or CaptionStyle()
     caption_data = None
-    if preset.resize.burn_captions:
+    auto = preset.resize.burn_captions and preset.auto_captions
+    if auto:
+        if not transcription:
+            raise BatchError("Automatic captions need the transcription settings.")
+        caption_data = {"segments": [], "style": style.to_dict(), "width": w, "height": h, "title": item.name}
+    elif preset.resize.burn_captions:
         if captions:
             caption_data = {"segments": [s.to_dict() for s in captions], "style": style.to_dict(), "width": w,
                             "height": h, "title": item.name}
@@ -357,6 +367,7 @@ def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwr
         "keep_ranges": None, "captions": caption_data, "output_settings": preset.output.to_dict(),
         "batch_id": batch_id, "batch_item": item.id,
         "effects": preset.effects.to_dict() if preset.effects.active else None,
+        "captions_auto": dict(transcription) if auto else None,
     }
     if preset.smart_cut:
         if not meta.has_audio:
