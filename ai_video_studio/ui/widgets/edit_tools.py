@@ -444,6 +444,9 @@ class ResizePanel(ToolPanel):
             self.media_id(), enabled=on)))
         for box in (self.size, self.mode):
             box.currentIndexChanged.connect(self._on_change)
+            # Picking an entry is a choice even when it is the one already shown (e.g. the default
+            # 1080×1920 Blur background): it switches resizing on for the final export.
+            box.activated.connect(self._on_change)
         for w in [self.width_spin, self.height_spin, self.zoom, self.blur, self.pos_x, self.pos_y] + self.crop:
             w.valueChanged.connect(self._on_change)
         self.preview_button.clicked.connect(self.page.preview_frame)

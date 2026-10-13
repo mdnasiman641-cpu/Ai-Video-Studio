@@ -95,8 +95,8 @@ def test_edit_page_settings_are_saved_and_reach_the_final_export(qtbot, window, 
     smart.include.setChecked(True)
     page.show_tool("final")
     summary = page.panels["final"].summary.text()
-    for part in ("✔ <b>Smart Cut</b>", "✔ <b>Captions</b>", "✔ <b>Framing</b>: Resize / Crop, 320×320",
-                 "✔ <b>Speed</b>: speed 2×", "✔ <b>Audio</b>: volume 150%"):
+    for part in ("✔ <b>Smart Cut</b>", "✔ <b>Captions</b>", "✔ <b>Framing</b>: 320×320 (1:1), Blur background",
+                 "✔ <b>Speed</b>: 2×", "✔ <b>Audio</b>: enabled — volume 150%"):
         assert part in summary, summary
 
     output = tmp_path / "final.mp4"
@@ -314,7 +314,7 @@ def test_burn_in_before_captions_exist_is_reported_then_applied_with_the_style(w
     caps.style_editor.set_style(style)
     caps.style_editor.style_changed.emit(style)  # as when the user edits the style
     assert item.caption_style == style
-    assert "✔ <b>Captions</b>: 2 caption(s) burned in" in page.summary_html(item)
+    assert "✔ <b>Captions</b>: enabled — 2 caption(s)" in page.summary_html(item)
     job = queued_export(window, page, tmp_path)
     meta = item.metadata
     expected = build_ass(output_captions(item.captions.segments, None, 1.0), style, meta.display_width,
@@ -409,7 +409,7 @@ def test_existing_captions_and_chosen_size_are_exported_after_smart_cut(qtbot, w
     c.set_caption_style([item.id], BUILTIN_PRESETS["Highlight Style"])  # opaque yellow box behind the text
     ops = c.final_operations(item.id)
     assert ops["burn_captions"] and page.panels["captions"].burn.isChecked()  # existing captions are used
-    assert "✔ <b>Captions</b>: 2 caption(s) burned in" in page.summary_html(item)
+    assert "✔ <b>Captions</b>: enabled — 2 caption(s)" in page.summary_html(item)
     assert "Resize / Crop is switched off" in page.summary_html(item)
     resize = page.panels["resize"]
     assert "Switched off" in resize.status.text()
@@ -442,7 +442,7 @@ def test_existing_captions_and_chosen_size_are_exported_after_smart_cut(qtbot, w
     window.resize_page.blur.setValue(window.resize_page.blur.value() + 1)
     assert item.resize.burn_set and not item.resize.burn_captions and item.resize.enabled
     window.navigate("Edit")
-    assert "Captions</b>: switched off" in page.summary_html(item)
+    assert "Captions</b>: disabled — switched off" in page.summary_html(item)
     window.services.jobs.pause()
     job = page.start_export(str(tmp_path / "nocaps.mp4"), OutputSettings(encoder="cpu"))
     assert job.payload["ass"] is None and job.payload["stage"]["layout"]["out_w"] == 320
@@ -470,7 +470,8 @@ def test_auto_reframe_with_valid_analysis_reaches_the_export(window, tmp_path):
     job = page.start_export(str(tmp_path / "rf.mp4"), OutputSettings(encoder="cpu"))
     stage = job.payload["stage"]
     assert stage["type"] == "reframe" and (stage["out_w"], stage["out_h"]) == (1080, 1920) and stage["keyframes"]
-    assert "✔ <b>Framing</b>: Auto Reframe, 1080×1920 (Auto Face Tracking)" in page.summary_html(item)
+    assert "✔ <b>Framing</b>: 1080×1920 (9:16), Auto Reframe" in page.summary_html(item)
+    assert "✔ <b>Auto Reframe</b>: enabled — Auto Face Tracking" in page.summary_html(item)
     assert_summary_matches_payload(page, item, job.payload)
     page.panels["resize"].enabled.setChecked(False)  # framing off: original frame, no reframe
     job = page.start_export(str(tmp_path / "plain.mp4"), OutputSettings(encoder="cpu"))

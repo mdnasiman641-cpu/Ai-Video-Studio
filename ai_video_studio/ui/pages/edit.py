@@ -37,7 +37,7 @@ from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.render_jobs import RENDER_FRAME_JOB
 from ai_video_studio.reframe.model import TRACKING_MODES
 from ai_video_studio.render.batch import preset_from_edit
-from ai_video_studio.render.layout import MODES
+from ai_video_studio.render.layout import MODES, aspect_text
 from ai_video_studio.render.pipeline import kept_duration
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController
 from ai_video_studio.ui.widgets.caption_overlay import paint_segments
@@ -324,6 +324,7 @@ class EditPage(QWidget):
 
     # ------------------------------------------------------------------ final export
     def summary_html(self, item: MediaItem) -> str:
+        """One line per operation, from the same settings and calculations the export uses."""
         ops = self.controller.final_operations(item.id)
         rows = []
 
@@ -332,39 +333,69 @@ class EditPage(QWidget):
             rows.append(f"{mark} <b>{name}</b>: {detail}")
 
         cuts = self.controller.applied_cuts(item.id)
-        row(ops["use_cuts"], "Smart Cut", f"{len(cuts)} kept part(s), {format_duration(kept_duration(cuts))}"
-            if ops["use_cuts"] else ("off" if ops["cuts_available"] else "no cuts applied"))
+        row(ops["use_cuts"], "Smart Cut", f"enabled — {len(cuts)} kept part(s), {format_duration(kept_duration(cuts))}"
+            if ops["use_cuts"] else ("disabled" if ops["cuts_available"] else "disabled — no cuts applied"))
         if ops["captions_missing"]:
             rows.append("⚠ <b>Captions</b>: burn-in is on, but this video has no captions yet (generate or import "
                         "them in the Captions tool); the export stops until they exist or burn-in is off")
+        elif ops["burn_captions"]:
+            own = sum(1 for seg in item.captions.segments if seg.style)
+            row(True, "Captions", f"enabled — {len(item.captions.segments)} caption(s), "
+                f"{self.style_name(item.effective_caption_style)}" + (f" ({own} with their own style)" if own else ""))
         else:
-            row(ops["burn_captions"], "Captions", f"{len(item.captions.segments)} caption(s) burned in"
-                if ops["burn_captions"] else ("switched off in the Captions tool" if ops["captions_available"]
-                                              else "no captions"))
+            row(False, "Captions", "disabled — switched off in the Captions tool" if ops["captions_available"]
+                else "disabled — no captions")
         s = self.controller.resize_settings(item.id)
         if ops["use_resize"]:
             try:  # the same calculation the export uses, so a problem shows here, not only on export
-                stage, (w, h), _notes = self.controller.resize_stage(item.id, s)
+                _stage, (w, h), _notes = self.controller.resize_stage(item.id, s)
+                framing = "Auto Reframe" if ops["reframe"] else MODES[s.mode].split(" —")[0]
+                row(True, "Framing", f"{w}×{h} ({aspect_text(w, h)}), {framing}")
                 if ops["reframe"]:
                     mode = TRACKING_MODES[self.controller.reframe_state(item.id).settings.tracking_mode].label
-                    row(True, "Framing", f"Auto Reframe, {w}×{h} ({mode})")
+                    row(True, "Auto Reframe", f"enabled — {mode}")
                 else:
-                    row(True, "Framing", f"Resize / Crop, {w}×{h}, {MODES[s.mode].split(' —')[0]}")
+                    row(False, "Auto Reframe", "disabled")
             except StudioError as exc:
                 rows.append(f"⚠ <b>Framing</b>: {exc}")
+                if ops["reframe"]:
+                    rows.append("⚠ <b>Auto Reframe</b>: cannot be applied (see Framing); the export stops")
         else:
             row(False, "Framing", "original frame" + (" (Resize / Crop is switched off in its tool)"
                                                       if ops["resize_configured"] else ""))
-        effects = ops["effects"]
-        speed = [p for p in effects.summary() if p.startswith(("speed", "video "))]
-        audio = [p for p in effects.summary() if p not in speed]
-        row(bool(speed), "Speed", speed[0] if speed else "unchanged")
-        if audio and not item.metadata.has_audio:
-            rows.append("⚠ <b>Audio</b>: " + ", ".join(audio) + " is on, but the video has no audio track; the "
-                        "export stops until audio processing is off")
+            row(False, "Auto Reframe", "disabled")
+        e = ops["effects"]
+        if e.speed_enabled:
+            detail = f"{e.video_factor:g}×" + (" (no change)" if abs(e.video_factor - 1) < 1e-9 else "")
+            if e.unlinked:
+                detail += f", audio {e.audio_factor:g}× (not in sync)"
+            elif abs(e.audio_factor - 1) > 1e-9:
+                detail += ", audio follows" + ("" if e.preserve_pitch else " (pitch changes)")
+            row(True, "Speed", detail)
         else:
-            row(bool(audio), "Audio", ", ".join(audio) if audio else "unchanged")
+            row(False, "Speed", "disabled")
+        if e.audio_enabled:
+            parts = [f"volume {int(e.volume)}%"] + [p for p in e.summary() if not p.startswith(
+                ("speed", "video ", "volume"))]
+            if not item.metadata.has_audio:
+                rows.append("⚠ <b>Audio</b>: processing is on, but the video has no audio track; the export stops "
+                            "until audio processing is off")
+            else:
+                row(True, "Audio", "enabled — " + ", ".join(parts))
+        else:
+            row(False, "Audio", "disabled")
         return "<br>".join(rows)
+
+    def style_name(self, style: CaptionStyle) -> str:
+        """The caption template a style comes from, or "custom style"."""
+        presets = self.controller.services.presets
+        for name, _builtin in presets.names():
+            try:
+                if presets.get(name) == style:
+                    return name
+            except StudioError:
+                continue
+        return "custom style"
 
     def export_final(self) -> Job | None:
         item = self.current()

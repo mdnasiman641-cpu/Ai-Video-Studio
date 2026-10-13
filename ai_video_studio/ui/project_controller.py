@@ -731,7 +731,8 @@ class ProjectController(QObject):
             "duration": meta.duration, "fps": meta.fps, "has_audio": meta.has_audio,
             "audio_codec": meta.audio_codec, "keep_ranges": [list(r) for r in keep] if keep else None,
             "stage": stage, "ass": ass, "output_settings": settings.to_dict(), "preview": preview,
-            "effects": effects.to_dict() if effects.active else None,
+            # switched-on speed/audio settings always go to the job (no-op values add no filters)
+            "effects": effects.to_dict() if effects.speed_enabled or effects.audio_enabled else None,
         }
         return self.services.jobs.submit(RENDER_JOB, title or f"Export edited video: {item.name}", payload,
                                          project_id=self.project.id)
