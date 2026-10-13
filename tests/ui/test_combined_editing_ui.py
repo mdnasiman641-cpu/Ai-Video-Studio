@@ -378,3 +378,101 @@ def test_auto_reframe_keeps_the_users_mode_and_never_uses_a_wrong_analysis(windo
     assert queued_export(window, page, tmp_path) is None
     reframe.use.setChecked(False)
     assert item.resize.mode == "crop" and item.resize.crop_w == 0.5  # the user's own framing is back
+
+
+def assert_summary_matches_payload(page, item, payload):
+    """Every ✔ in the Final Export summary has its operation in the export job, and only those."""
+    summary = page.summary_html(item)
+    assert ("✔ <b>Smart Cut</b>" in summary) == bool(payload["keep_ranges"])
+    assert ("✔ <b>Captions</b>" in summary) == bool(payload["ass"])
+    assert ("✔ <b>Framing</b>" in summary) == bool(payload["stage"])
+    effects = payload["effects"] or {}
+    assert ("✔ <b>Speed</b>" in summary) == bool(effects.get("speed_enabled"))
+    assert ("✔ <b>Audio</b>" in summary) == bool(effects.get("audio_enabled"))
+
+
+def test_existing_captions_and_chosen_size_are_exported_after_smart_cut(qtbot, window, tmp_path):
+    """The reported case: cuts applied first (which creates the video's resize settings with
+    resizing off), captions exist, then a size is chosen. Real FFmpeg export."""
+    import subprocess
+
+    window.navigate("Edit")
+    page = window.edit_page
+    c = window.controller
+    item = c.project.media[0]
+    item.smart_cut = SmartCutState(applied=[(0.0, 1.0), (2.0, 3.0)])
+    c.smartcut_changed.emit(item.id)
+    smart = page.panels["smart_cut"]
+    smart.include.setChecked(False)
+    smart.include.setChecked(True)  # creates the resize settings implicitly (resizing off)
+    c.set_captions(item.id, CaptionTrack([CaptionSegment(0.2, 0.9, "CAPTION"), CaptionSegment(2.1, 2.9, "END")]))
+    c.set_caption_style([item.id], BUILTIN_PRESETS["Highlight Style"])  # opaque yellow box behind the text
+    ops = c.final_operations(item.id)
+    assert ops["burn_captions"] and page.panels["captions"].burn.isChecked()  # existing captions are used
+    assert "✔ <b>Captions</b>: 2 caption(s) burned in" in page.summary_html(item)
+    assert "Resize / Crop is switched off" in page.summary_html(item)
+    resize = page.panels["resize"]
+    assert "Switched off" in resize.status.text()
+    resize.size.setCurrentIndex(resize.size.findData("custom"))
+    resize.width_spin.setValue(320)
+    resize.height_spin.setValue(320)
+    assert c.final_operations(item.id)["use_resize"] and resize.enabled.isChecked()
+
+    output = tmp_path / "final.mp4"
+    job = page.start_export(str(output), OutputSettings(encoder="cpu", quality="small"))
+    assert_summary_matches_payload(page, item, job.payload)
+    assert "Dialogue: 1,0:00:01.10,0:00:01.90,Default" in job.payload["ass"]  # 2.1 s → 1.1 s after the cut
+    qtbot.waitUntil(lambda: window.services.jobs.store.get(job.id).state.is_finished, timeout=60000)
+    done = window.services.jobs.store.get(job.id)
+    assert done.state is JobState.COMPLETED, done.error
+    meta = probe_video(str(output), find_tool("ffprobe"))
+    assert (meta.width, meta.height) == (320, 320) and abs(meta.duration - 2.0) < 0.1
+
+    def yellow_pixels(at: float) -> int:
+        raw = subprocess.run([find_tool("ffmpeg"), "-v", "error", "-ss", str(at), "-i", str(output), "-frames:v", "1",
+                              "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], check=True, capture_output=True).stdout
+        return sum(1 for i in range(0, len(raw), 3) if raw[i] > 200 and raw[i + 1] > 200 and raw[i + 2] < 80)
+
+    assert yellow_pixels(0.5) > 500 and yellow_pixels(1.5) > 500  # the caption box is burned in
+    assert yellow_pixels(1.0) < 50  # between captions: nothing
+
+    # switched off by the user: respected, also after the Resize & Crop page changes its own settings
+    page.panels["captions"].burn.setChecked(False)
+    window.navigate("Resize & Crop")
+    window.resize_page.blur.setValue(window.resize_page.blur.value() + 1)
+    assert item.resize.burn_set and not item.resize.burn_captions and item.resize.enabled
+    window.navigate("Edit")
+    assert "Captions</b>: switched off" in page.summary_html(item)
+    window.services.jobs.pause()
+    job = page.start_export(str(tmp_path / "nocaps.mp4"), OutputSettings(encoder="cpu"))
+    assert job.payload["ass"] is None and job.payload["stage"]["layout"]["out_w"] == 320
+    assert_summary_matches_payload(page, item, job.payload)
+
+
+def test_auto_reframe_with_valid_analysis_reaches_the_export(window, tmp_path):
+    from ai_video_studio.reframe.model import ReframeState, TrackingAnalysis
+
+    window.navigate("Edit")
+    page = window.edit_page
+    c = window.controller
+    item = c.project.media[0]
+    settings = c.reframe_state(item.id).settings
+    settings.tracking_mode = "auto_face"
+    c.set_reframe_settings(item.id, settings)
+    from ai_video_studio.reframe.model import Track, TrackSample
+
+    face = Track(1, "face", [TrackSample(t / 5, 0.1 + 0.02 * t, 0.3, 0.1, 0.18, 0.9) for t in range(15)])
+    item.reframe = ReframeState(settings, TrackingAnalysis(640, 360, 3.0, 5.0, 15, "test", tracks=[face],
+                                                           features=["faces", "persons"]))
+    page.panels["reframe"].use.setChecked(True)  # also switches the framing on
+    assert "Ready" in page.panels["reframe"].status.text()
+    window.services.jobs.pause()
+    job = page.start_export(str(tmp_path / "rf.mp4"), OutputSettings(encoder="cpu"))
+    stage = job.payload["stage"]
+    assert stage["type"] == "reframe" and (stage["out_w"], stage["out_h"]) == (1080, 1920) and stage["keyframes"]
+    assert "✔ <b>Framing</b>: Auto Reframe, 1080×1920 (Auto Face Tracking)" in page.summary_html(item)
+    assert_summary_matches_payload(page, item, job.payload)
+    page.panels["resize"].enabled.setChecked(False)  # framing off: original frame, no reframe
+    job = page.start_export(str(tmp_path / "plain.mp4"), OutputSettings(encoder="cpu"))
+    assert job.payload["stage"] is None
+    assert_summary_matches_payload(page, item, job.payload)

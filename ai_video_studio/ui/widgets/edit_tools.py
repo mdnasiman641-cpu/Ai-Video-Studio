@@ -249,7 +249,7 @@ class CaptionsPanel(ToolPanel):
         self.body.addWidget(muted("Double-click a cell to edit the text or the time (mm:ss.mmm). Split, merge, undo "
                                   "and AI checks are on the Captions page."))
         self.burn.toggled.connect(lambda on: self.guarded(lambda: self.controller.update_resize(
-            self.media_id(), burn_captions=on)))
+            self.media_id(), burn_captions=on, burn_set=True)))
         self.generate_button.clicked.connect(lambda: self.page.captions_action("generate"))
         self.import_button.clicked.connect(lambda: self.page.captions_action("import_srt"))
         self.export_button.clicked.connect(lambda: self.page.captions_action("export_srt"))
@@ -478,8 +478,9 @@ class ResizePanel(ToolPanel):
         self.blur.setEnabled(mode == "blur")
         try:
             layout = self.controller.resize_layout(item.id, s)
-            self.status.setText(f"Output {layout.out_w}×{layout.out_h}" + ("" if ops["use_resize"] else
-                                                                           " (switched off: original frame)"))
+            self.status.setText(f"Output {layout.out_w}×{layout.out_h}." if ops["use_resize"] else
+                            f"⚠ Switched off: the final export keeps the original frame. Tick “Resize / crop in "
+                            f"the final export” to export {layout.out_w}×{layout.out_h}.")
         except StudioError as exc:
             self.status.setText(f"⚠ {exc}")
 

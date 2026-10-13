@@ -85,6 +85,7 @@ class ResizeSettings:
     use_cuts: bool = True      # apply the Smart Cut cuts, if any
     enabled: bool = True       # Edit page final export: resize/crop (or Auto Reframe) is switched on
     mode_before_reframe: str = ""  # the fixed mode to return to when Auto Reframe is switched off
+    burn_set: bool = False     # burn-in was switched on/off by the user (otherwise: on when captions exist)
 
     def validate(self) -> None:
         errors = []

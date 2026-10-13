@@ -339,7 +339,8 @@ class EditPage(QWidget):
                         "them in the Captions tool); the export stops until they exist or burn-in is off")
         else:
             row(ops["burn_captions"], "Captions", f"{len(item.captions.segments)} caption(s) burned in"
-                if ops["burn_captions"] else ("off" if ops["captions_available"] else "no captions"))
+                if ops["burn_captions"] else ("switched off in the Captions tool" if ops["captions_available"]
+                                              else "no captions"))
         s = self.controller.resize_settings(item.id)
         if ops["use_resize"]:
             try:  # the same calculation the export uses, so a problem shows here, not only on export
@@ -352,7 +353,8 @@ class EditPage(QWidget):
             except StudioError as exc:
                 rows.append(f"⚠ <b>Framing</b>: {exc}")
         else:
-            row(False, "Framing", "original frame")
+            row(False, "Framing", "original frame" + (" (Resize / Crop is switched off in its tool)"
+                                                      if ops["resize_configured"] else ""))
         effects = ops["effects"]
         speed = [p for p in effects.summary() if p.startswith(("speed", "video "))]
         audio = [p for p in effects.summary() if p not in speed]

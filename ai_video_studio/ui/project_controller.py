@@ -749,8 +749,11 @@ class ProjectController(QObject):
         cuts = self.applied_cuts(media_id)
         has_captions = bool(item.captions and item.captions.segments)
         use_resize = rs is not None and rs.enabled
-        burn_requested = bool(rs and rs.burn_captions)
+        # Captions are burned in when they exist, unless the user switched burn-in off (Captions tool
+        # or Resize & Crop page). Switches created implicitly by another control do not count as a choice.
+        burn_requested = bool(rs and rs.burn_captions) or (has_captions and not (rs and rs.burn_set))
         return {"use_cuts": bool(cuts) and (rs.use_cuts if rs else True), "cuts_available": bool(cuts),
+                "resize_configured": rs is not None,
                 "burn_captions": has_captions and burn_requested, "captions_available": has_captions,
                 "captions_missing": burn_requested and not has_captions,
                 "use_resize": use_resize, "reframe": use_resize and rs.mode == "reframe",

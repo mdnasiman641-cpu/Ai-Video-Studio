@@ -8,6 +8,7 @@ background is approximated on screen; **Exact Frame Preview** renders the frame 
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt
@@ -382,8 +383,12 @@ class ResizePage(QWidget):
 
     def _settings_from_controls(self) -> ResizeSettings:
         crop = [box.value() / 100 for box in self.crop_boxes]
-        return ResizeSettings(
-            preset=self.preset.currentData(), width=self.width_spin.value(), height=self.height_spin.value(),
+        # Start from the stored settings so switches this page does not show (Edit page final export:
+        # enabled, burn_set, mode_before_reframe) are kept.
+        stored = self.controller.resize_settings(self._media_id)
+        burn_set = stored.burn_set or self.burn.isChecked() != stored.burn_captions
+        return replace(
+            stored, burn_set=burn_set, preset=self.preset.currentData(), width=self.width_spin.value(), height=self.height_spin.value(),
             mode=self.mode.currentData(), pos_x=self.pos_x.value() / 100, pos_y=self.pos_y.value() / 100,
             zoom=self.zoom.value() / 100, crop_x=crop[0], crop_y=crop[1], crop_w=max(0.01, crop[2]),
             crop_h=max(0.01, crop[3]), lock_aspect=self.lock_aspect.isChecked(), background=self.settings.background,
