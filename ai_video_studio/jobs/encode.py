@@ -81,6 +81,8 @@ def encode_with_fallback(
             raise StudioError(f"Export failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
         os.replace(partial, output)
     finally:
-        if partial.exists() and not remove_file(partial):
+        # A cancelled FFmpeg can keep the file locked on Windows for a few seconds after it was
+        # killed (an antivirus scan of the new file can add to that), so keep trying for up to 10 s.
+        if partial.exists() and not remove_file(partial, attempts=100):
             log.warning("Could not remove partial export", extra={"path": str(partial)})
     return codec, warnings
