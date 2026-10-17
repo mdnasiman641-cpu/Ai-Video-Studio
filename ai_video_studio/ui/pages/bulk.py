@@ -1,27 +1,41 @@
-"""Bulk Processing page: many videos, shared or per-video settings, one export job per video.
+"""Bulk Processing page: add many videos, set the editing operations once, export them all.
 
-Each video gets its own ``render_video`` job in the Export Queue, so progress, cancel, retry
-and crash recovery work exactly as for single exports. At most "Max concurrent renders"
-(Settings, default 1) render at once. **Pause Batch** holds the videos that have not started;
-the one being rendered finishes (cancel it to stop it now). The batch list itself is saved in
-the user database, so it survives a restart or crash.
+Layout: the video list (tick the videos to work on), the Batch Edit Settings cards (one
+switch per operation), Output Settings, the Processing Queue and the Batch Summary with
+**Start Batch**.
+
+Every ticked video becomes its own ``render_video`` job in the Export Queue: the same export
+the Edit page uses (Smart Cut, captions, Resize / Crop or Auto Reframe, speed and audio in one
+FFmpeg pass, NVENC when it works, else the CPU). At most "Max concurrent renders" (Settings,
+default 1) run at once, so videos are processed one after another. A finished file is read
+back with FFprobe before the job counts as completed. Videos use the shared settings unless
+**Apply to Selected** gave them their own. The batch list is saved in the user database, so it
+survives a restart or crash.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, QRunnable, QSize, QStandardPaths, Qt, QThreadPool, Signal
+from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
+    QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -29,6 +43,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +54,7 @@ from ai_video_studio.core import paths
 from ai_video_studio.core.errors import StudioError
 from ai_video_studio.core.ffmpeg_tools import VideoMetadata
 from ai_video_studio.core.media import format_duration, validate_video_path
+from ai_video_studio.core.process import run_process
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.render_jobs import RENDER_FRAME_JOB, RENDER_JOB
@@ -56,18 +72,96 @@ from ai_video_studio.render.naming import CONFLICT_POLICIES, path_key, plan_outp
 from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
 from ai_video_studio.ui.caption_dialogs import FramePreviewDialog
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController, expand_paths
-from ai_video_studio.ui.widgets.common import Card, muted, open_folder, page_title, section_title
-from ai_video_studio.ui.widgets.preset_editor import PresetDialog, PresetEditor
+from ai_video_studio.ui.widgets.cards import TEAL
+from ai_video_studio.ui.widgets.common import muted, open_folder, reveal_in_explorer, section_title
+from ai_video_studio.ui.widgets.preset_editor import PresetEditor
+from ai_video_studio.ui.widgets.video_preview import VideoPreview
 
 log = logging.getLogger(__name__)
 
-COLUMNS = ["Video", "Duration", "Size", "Settings", "Output", "Status", "Progress", "Note"]
+COLUMNS = ["", "", "Video", "Duration", "Resolution", "Size", "Settings", "Status", "Preview", ""]
+COL_CHECK, COL_THUMB, COL_VIDEO, COL_DURATION, COL_RESOLUTION, COL_SIZE, COL_SETTINGS, COL_STATUS, COL_PREVIEW, \
+    COL_REMOVE = range(len(COLUMNS))
+QUEUE_COLUMNS = ["#", "Video", "Progress", "Status", "Details", "Action"]
 STATUS_LABELS = {
-    "waiting": "Waiting", "held": "Waiting (paused)", "analyzing": "Analyzing", "ready": "Ready",
-    "rendering": "Rendering", "completed": "Completed", "failed": "Failed", "cancelled": "Cancelled",
+    "waiting": "Waiting", "held": "Waiting (paused)", "analyzing": "Processing", "ready": "Ready",
+    "rendering": "Processing", "completed": "Completed", "failed": "Failed", "cancelled": "Cancelled",
     "skipped": "Skipped",
 }
+STATUS_COLORS = {"completed": "#5fd38d", "failed": "#ff6b6b", "cancelled": "#ffb84d", "skipped": "#ffb84d",
+                 "analyzing": TEAL, "rendering": TEAL}
 ACTIVE = {JobState.QUEUED, JobState.RUNNING, JobState.HELD}
+THUMB = QSize(80, 45)
+PAGE_STYLE = f"""
+QFrame#Panel {{ background-color: #15181d; border: 1px solid #262b33; border-radius: 10px; }}
+QPushButton#StartBatch {{ background-color: {TEAL}; border: 1px solid {TEAL}; color: #06201c; font-size: 13pt;
+    font-weight: 700; padding: 10px; border-radius: 8px; }}
+QPushButton#StartBatch:hover {{ background-color: #35d8c4; }}
+QPushButton#StartBatch:disabled {{ background-color: #1f3b38; border-color: #1f3b38; color: #5c7f7a; }}
+QPushButton#Teal {{ background-color: {TEAL}; border-color: {TEAL}; color: #06201c; font-weight: 600; }}
+QPushButton#Teal:disabled {{ background-color: #1f3b38; border-color: #1f3b38; color: #5c7f7a; }}
+"""
+
+
+def human_size(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def panel(title: str | None = None) -> tuple[QFrame, QVBoxLayout]:
+    frame = QFrame()
+    frame.setObjectName("Panel")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(12, 10, 12, 10)
+    if title:
+        layout.addWidget(section_title(title))
+    return frame, layout
+
+
+class _ThumbSignals(QObject):
+    ready = Signal(str, str)  # video path, image path
+
+
+class _ThumbJob(QRunnable):
+    """Grab one small frame with FFmpeg off the GUI thread (cached in the temp folder)."""
+
+    def __init__(self, ffmpeg: Path, video: str, at: float, out: Path, signals: _ThumbSignals):
+        super().__init__()
+        self.ffmpeg, self.video, self.at, self.out, self.signals = ffmpeg, video, at, out, signals
+
+    def run(self) -> None:
+        try:
+            if not self.out.is_file():
+                self.out.parent.mkdir(parents=True, exist_ok=True)
+                run_process([str(self.ffmpeg), "-hide_banner", "-nostdin", "-y", "-v", "error", "-ss", f"{self.at:.2f}",
+                             "-i", self.video, "-frames:v", "1", "-vf", f"scale={THUMB.width() * 2}:-2",
+                             str(self.out)], timeout=30)
+            if self.out.is_file():
+                self.signals.ready.emit(self.video, str(self.out))
+        except Exception:  # noqa: BLE001 - a missing thumbnail must never break the page
+            log.debug("Thumbnail failed", extra={"path": self.video})
+
+
+class SourcePreviewDialog(QDialog):
+    """Play a source video (the original, before editing)."""
+
+    def __init__(self, parent: QWidget | None, path: str, fps: float | None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Preview: {Path(path).name}")
+        self.preview = VideoPreview()
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.preview)
+        layout.addWidget(muted("The original video. Use Preview Settings to see one frame with the batch settings."))
+        self.resize(820, 560)
+        self.preview.load(path, fps)
+
+    def done(self, result: int) -> None:  # noqa: D102 - release the file when the dialog closes
+        self.preview.player.stop()
+        self.preview.load(None)
+        super().done(result)
 
 
 class BulkPage(QWidget):
@@ -77,131 +171,237 @@ class BulkPage(QWidget):
         self.services = controller.services
         self._probes: dict[str, str] = {}   # probe job id -> item id
         self._filling = False
+        self._thumbs: dict[str, QPixmap] = {}
+        self._thumb_pool = QThreadPool(self)
+        self._thumb_pool.setMaxThreadCount(2)
+        self._thumb_signals = _ThumbSignals()
+        self._thumb_signals.ready.connect(self._on_thumbnail)
+        self._preview_job: str | None = None
+        self._preview_notes: list[str] = []
         self.batch = self.services.batches.latest() or Batch()
+        if not self.batch.output_dir:
+            self.batch.output_dir = default_output_dir()
         self.setAcceptDrops(True)
+        self.setStyleSheet(PAGE_STYLE)
 
-        self.add_button = QPushButton("Add Videos…")
-        self.add_folder_button = QPushButton("Add Folder…")
+        # -- header --
+        title = QLabel("Bulk Processing")
+        title.setObjectName("PageTitle")
+        subtitle = muted("Apply editing settings to multiple videos at once.")
+        self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumWidth(220)
+        self.apply_preset_button = QPushButton("Load Preset")
+        self.save_preset_button = QPushButton("Save Preset")
+        self.save_preset_button.setObjectName("Teal")
+        self.preset_menu_button = QToolButton()
+        self.preset_menu_button.setText("⋯")
+        self.preset_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self)
+        self.update_preset_button = QAction("Update Preset with Current Settings", self)
+        self.rename_preset_button = QAction("Rename Preset…", self)
+        self.delete_preset_button = QAction("Delete Preset…", self)
+        for action in (self.update_preset_button, self.rename_preset_button, self.delete_preset_button):
+            menu.addAction(action)
+        self.preset_menu_button.setMenu(menu)
+        head = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        head.addLayout(titles, 1)
+        head.addWidget(QLabel("Preset:"))
+        for w in (self.preset_combo, self.apply_preset_button, self.save_preset_button, self.preset_menu_button):
+            head.addWidget(w)
+
+        # -- video list --
+        self.add_button = QPushButton("＋ Add Videos")
+        self.add_button.setObjectName("Teal")
+        self.add_folder_button = QPushButton("Add Folder")
         self.remove_button = QPushButton("Remove Selected")
-        self.clear_button = QPushButton("Clear List")
+        self.clear_button = QPushButton("Clear All")
+        self.select_all = QCheckBox("Select all")
+        self.selected_label = QLabel("")
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(THUMB.height() + 10)
+        self.table.setIconSize(THUMB)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
-        self.customize_button = QPushButton("Customize Selected…")
+        header.setSectionResizeMode(COL_VIDEO, QHeaderView.ResizeMode.Stretch)
+        for col in (COL_DURATION, COL_RESOLUTION, COL_SIZE, COL_SETTINGS, COL_STATUS):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setWordWrap(False)
+        for col, width in ((COL_CHECK, 28), (COL_THUMB, THUMB.width() + 8), (COL_PREVIEW, 60), (COL_REMOVE, 36)):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(col, width)
+        self.empty_label = muted("No videos yet. Click Add Videos, Add Folder, or drop video files here.")
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        list_frame, list_layout = panel()
+        tools = QHBoxLayout()
+        for w in (self.add_button, self.add_folder_button, self.remove_button, self.clear_button):
+            tools.addWidget(w)
+        tools.addStretch(1)
+        tools.addWidget(self.select_all)
+        tools.addWidget(self.selected_label)
+        list_layout.addLayout(tools)
+        list_layout.addWidget(self.table, 1)
+        list_layout.addWidget(self.empty_label)
+
+        # -- batch edit settings --
+        self.editor = PresetEditor(self.batch.shared, caption_presets=self.services.presets)
+        self.apply_selected_button = QPushButton("Apply to Selected")
+        self.apply_selected_button.setToolTip("Give the ticked videos their own copy of these settings. The others "
+                                              "keep following the shared settings.")
         self.shared_button = QPushButton("Use Shared Settings")
+        self.shared_button.setToolTip("The ticked videos follow the shared settings again.")
         self.all_shared_button = QPushButton("Apply Shared Settings to All")
         self.all_shared_button.setToolTip("Every video uses the shared settings (removes per-video settings).")
-        self.preview_button = QPushButton("Preview Selected")
-        self.preview_button.setToolTip("Render one frame of the selected video with its settings (framing and "
-                                       "caption style), without exporting the video.")
-        self._preview_job: str | None = None
-        self._preview_notes: list[str] = []
+        self.preview_button = QPushButton("Preview Settings")
+        self.preview_button.setToolTip("Render one frame of the highlighted (or first ticked) video with its settings "
+                                       "(framing and caption style), without exporting the video.")
+        self.settings_error = QLabel("")
+        self.settings_error.setObjectName("Warning")
+        self.settings_error.setWordWrap(True)
+        settings_frame, settings_layout = panel()
+        srow = QHBoxLayout()
+        srow.addWidget(section_title("Batch Edit Settings"))
+        srow.addStretch(1)
+        for b in (self.preview_button, self.apply_selected_button, self.shared_button, self.all_shared_button):
+            srow.addWidget(b)
+        settings_layout.addLayout(srow)
+        settings_layout.addWidget(muted("These are the shared settings: every video uses them unless Apply to Selected "
+                                        "gave it its own (see the Settings column)."))
+        settings_layout.addWidget(self.settings_error)
+        scroll = QScrollArea()
+        scroll.setWidget(self.editor)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_layout.addWidget(scroll, 1)
 
-        self.preset_combo = QComboBox()
-        self.apply_preset_button = QPushButton("Apply")
-        self.save_preset_button = QPushButton("Save as Preset…")
-        self.update_preset_button = QPushButton("Update Preset")
-        self.rename_preset_button = QPushButton("Rename…")
-        self.delete_preset_button = QPushButton("Delete")
-        self.editor = PresetEditor(self.batch.shared, caption_presets=self.services.presets)
+        # -- output settings --
         self.output_dir = QLineEdit(self.batch.output_dir)
         self.output_dir.setPlaceholderText("Folder for the exported videos")
-        self.browse_button = QPushButton("Browse…")
+        self.browse_button = QPushButton("…")
+        self.browse_button.setToolTip("Choose the output folder")
         self.conflict = QComboBox()
         for key, label in CONFLICT_POLICIES.items():
             self.conflict.addItem(label, key)
         self.conflict.setCurrentIndex(max(0, self.conflict.findData(self.batch.conflict)))
-        self.settings_error = muted("")
-
-        self.start_button = QPushButton("Start Batch")
-        self.start_button.setObjectName("Primary")
-        self.pause_button = QPushButton("Pause Batch")
-        self.resume_button = QPushButton("Resume Batch")
-        self.cancel_button = QPushButton("Cancel Selected")
-        self.retry_button = QPushButton("Retry Failed")
-        self.open_button = QPushButton("Open Output Folder")
-        self.summary = muted("")
-        self.overall = QProgressBar()
-        self.overall.setRange(0, 100)
-
-        tools = QHBoxLayout()
-        for b in (self.add_button, self.add_folder_button, self.remove_button, self.clear_button):
-            tools.addWidget(b)
-        tools.addStretch(1)
-        tools.addWidget(self.preview_button)
-        tools.addWidget(self.customize_button)
-        tools.addWidget(self.shared_button)
-        tools.addWidget(self.all_shared_button)
-        left = QWidget()
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
-        ll.addLayout(tools)
-        ll.addWidget(self.table, 1)
-        ll.addWidget(self.summary)
-        ll.addWidget(self.overall)
-        run = QHBoxLayout()
-        for b in (self.start_button, self.pause_button, self.resume_button, self.cancel_button, self.retry_button,
-                  self.open_button):
-            run.addWidget(b)
-        run.addStretch(1)
-        ll.addLayout(run)
-
-        card = Card()
-        card.body.addWidget(section_title("Shared settings"))
-        prow = QHBoxLayout()
-        prow.addWidget(self.preset_combo, 1)
-        prow.addWidget(self.apply_preset_button)
-        card.body.addLayout(prow)
-        prow2 = QHBoxLayout()
-        for b in (self.save_preset_button, self.update_preset_button, self.rename_preset_button,
-                  self.delete_preset_button):
-            prow2.addWidget(b)
-        card.body.addLayout(prow2)
-        card.body.addWidget(self.editor)
-        out = QFormLayout()
+        out_frame, out_layout = panel("Output Settings")
+        form = QFormLayout()
         orow = QHBoxLayout()
         orow.addWidget(self.output_dir, 1)
         orow.addWidget(self.browse_button)
-        out.addRow("Output folder:", orow)
-        out.addRow("If the file exists:", self.conflict)
-        card.body.addLayout(out)
-        card.body.addWidget(self.settings_error)
-        card.body.addStretch(1)
-        scroll = QScrollArea()
-        scroll.setWidget(card)
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(400)
+        form.addRow("Output folder:", orow)
+        form.addRow("Format:", QLabel("MP4"))
+        form.addRow("File name:", self.editor.template)
+        form.addRow("If the file exists:", self.conflict)
+        out_layout.addLayout(form)
+        out_layout.addWidget(self.editor.output)
+        out_layout.addStretch(1)
+        out_scroll = QScrollArea()
+        out_scroll.setWidget(out_frame)
+        out_scroll.setWidgetResizable(True)
+        out_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        out_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        for box in self.editor.output.findChildren(QComboBox) + [self.conflict]:
+            box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            box.setMinimumContentsLength(8)
 
-        splitter = QSplitter()
-        splitter.addWidget(left)
-        splitter.addWidget(scroll)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        # -- processing queue --
+        self.queue_table = QTableWidget(0, len(QUEUE_COLUMNS))
+        self.queue_table.setHorizontalHeaderLabels(QUEUE_COLUMNS)
+        self.queue_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.queue_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.queue_table.verticalHeader().setVisible(False)
+        qh = self.queue_table.horizontalHeader()
+        qh.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.queue_table.setColumnWidth(0, 32)
+        self.queue_table.setColumnWidth(1, 180)
+        self.queue_table.setColumnWidth(2, 130)
+        self.clear_completed_button = QPushButton("Clear Completed")
+        self.clear_completed_button.setToolTip("Remove finished videos from the list. Their exported files are kept.")
+        self.retry_button = QPushButton("Retry Failed")
+        self.pause_button = QPushButton("Pause Batch")
+        self.resume_button = QPushButton("Resume Batch")
+        self.cancel_button = QPushButton("Cancel Selected")
+        self.cancel_button.setToolTip("Cancel the videos highlighted in the queue (or the ticked videos).")
+        self.open_button = QPushButton("Open Output Folder")
+        queue_frame, queue_layout = panel("Processing Queue")
+        queue_layout.addWidget(self.queue_table, 1)
+        qrow = QHBoxLayout()
+        for b in (self.clear_completed_button, self.retry_button, self.pause_button, self.resume_button,
+                  self.cancel_button, self.open_button):
+            qrow.addWidget(b)
+        queue_layout.addLayout(qrow)
+
+        # -- summary and start --
+        self.summary = muted("")
+        self.summary.setWordWrap(True)
+        self.counts = {k: QLabel("0") for k in ("Total videos", "Selected", "Completed", "Processing", "Waiting",
+                                                 "Failed", "Total duration", "Output size")}
+        self.overall = QProgressBar()
+        self.overall.setRange(0, 100)
+        self.start_button = QPushButton("▶  Start Batch")
+        self.start_button.setObjectName("StartBatch")
+        self.start_button.setToolTip("Export every ticked, ready video with its settings, one after another.")
+        sum_frame, sum_layout = panel("Batch Summary")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        for n, (name, label) in enumerate(self.counts.items()):
+            label.setAlignment(Qt.AlignmentFlag.AlignRight)
+            grid.addWidget(muted(name), n, 0)
+            grid.addWidget(label, n, 1)
+        sum_layout.addLayout(grid)
+        sum_layout.addWidget(self.overall)
+        sum_layout.addWidget(self.summary)
+        sum_layout.addStretch(1)
+        sum_layout.addWidget(self.start_button)
+
+        top = QSplitter()
+        top.addWidget(list_frame)
+        top.addWidget(settings_frame)
+        top.setStretchFactor(0, 1)
+        top.setStretchFactor(1, 1)
+        top.setSizes([900, 1000])
+        bottom = QSplitter()
+        bottom.addWidget(out_scroll)
+        bottom.addWidget(queue_frame)
+        bottom.addWidget(sum_frame)
+        bottom.setStretchFactor(0, 2)
+        bottom.setStretchFactor(1, 4)
+        bottom.setStretchFactor(2, 2)
+        sum_frame.setMinimumWidth(280)
+        out_scroll.setMinimumWidth(320)
+        main = QSplitter(Qt.Orientation.Vertical)
+        main.addWidget(top)
+        main.addWidget(bottom)
+        main.setStretchFactor(0, 3)
+        main.setStretchFactor(1, 2)
         layout = QVBoxLayout(self)
-        layout.addWidget(page_title("Bulk Processing"))
-        layout.addWidget(muted("Add videos, choose shared settings (or customise single videos) and start: every "
-                               "video becomes an export job in the Export Queue. Source videos are never changed "
-                               "or overwritten. Drag and drop videos or folders here."))
-        layout.addWidget(splitter, 1)
+        layout.addLayout(head)
+        layout.addWidget(main, 1)
 
+        # -- connections --
         self.add_button.clicked.connect(self.add_dialog)
         self.add_folder_button.clicked.connect(self.add_folder_dialog)
         self.remove_button.clicked.connect(self.remove_selected)
         self.clear_button.clicked.connect(self.clear_list)
-        self.customize_button.clicked.connect(self.customize_selected)
+        self.select_all.clicked.connect(self._on_select_all)
+        self.table.itemChanged.connect(self._on_item_changed)
+        self.table.itemSelectionChanged.connect(self._update_buttons)
+        self.queue_table.itemSelectionChanged.connect(self._update_buttons)
+        self.apply_selected_button.clicked.connect(self.apply_to_selected)
         self.shared_button.clicked.connect(self.use_shared_for_selected)
         self.all_shared_button.clicked.connect(self.apply_shared_to_all)
         self.preview_button.clicked.connect(self.preview_selected)
         self.apply_preset_button.clicked.connect(self.apply_preset)
         self.save_preset_button.clicked.connect(self.save_preset)
-        self.update_preset_button.clicked.connect(self.update_preset)
-        self.rename_preset_button.clicked.connect(self.rename_preset)
-        self.delete_preset_button.clicked.connect(self.delete_preset)
+        self.update_preset_button.triggered.connect(self.update_preset)
+        self.rename_preset_button.triggered.connect(self.rename_preset)
+        self.delete_preset_button.triggered.connect(self.delete_preset)
         self.preset_combo.currentIndexChanged.connect(self._update_buttons)
         self.editor.changed.connect(self._on_shared_changed)
         self.output_dir.editingFinished.connect(self._on_output_changed)
@@ -212,8 +412,8 @@ class BulkPage(QWidget):
         self.resume_button.clicked.connect(self.resume)
         self.cancel_button.clicked.connect(self.cancel_selected)
         self.retry_button.clicked.connect(self.retry_failed)
+        self.clear_completed_button.clicked.connect(self.clear_completed)
         self.open_button.clicked.connect(lambda: self.batch.output_dir and open_folder(self.batch.output_dir))
-        self.table.itemSelectionChanged.connect(self._update_buttons)
         bridge.job_changed.connect(self._on_job_changed)
         self._fill_presets()
         self._probe_missing()
@@ -261,7 +461,7 @@ class BulkPage(QWidget):
         if duplicates:
             message += f", {len(duplicates)} already in the list"
         if rejected:
-            message += f", {len(rejected)} skipped"
+            message += f", {len(rejected)} skipped: " + "; ".join(rejected[:3]) + ("…" if len(rejected) > 3 else "")
         self.summary.setText(message + ".")
         return len(added), len(duplicates), rejected
 
@@ -276,10 +476,14 @@ class BulkPage(QWidget):
                 self._probe(item)
 
     def selected_items(self) -> list[BatchItem]:
+        """The ticked videos."""
+        return [i for i in self.batch.items if i.selected]
+
+    def highlighted_items(self) -> list[BatchItem]:
         rows = sorted({i.row() for i in self.table.selectionModel().selectedRows()})
         items = []
         for r in rows:
-            cell = self.table.item(r, 0)
+            cell = self.table.item(r, COL_VIDEO)
             item = self.batch.find(cell.data(Qt.ItemDataRole.UserRole)) if cell else None
             if item is not None:
                 items.append(item)
@@ -289,8 +493,7 @@ class BulkPage(QWidget):
         job = self.job(item)
         return job is not None and job.state in ACTIVE
 
-    def remove_selected(self) -> None:
-        items = self.selected_items()
+    def remove_items(self, items: list[BatchItem]) -> None:
         busy = [i.name for i in items if self._active(i)]
         if busy:
             QMessageBox.warning(self, "Remove", "Cancel these first, they are queued or rendering:\n" + "\n".join(busy))
@@ -299,11 +502,14 @@ class BulkPage(QWidget):
         self.save()
         self.refresh()
 
+    def remove_selected(self) -> None:
+        self.remove_items(self.selected_items())
+
     def clear_list(self) -> None:
         if any(self._active(i) for i in self.batch.items):
-            QMessageBox.warning(self, "Clear List", "Some videos are still queued or rendering. Cancel them first.")
+            QMessageBox.warning(self, "Clear All", "Some videos are still queued or rendering. Cancel them first.")
             return
-        if self.batch.items and QMessageBox.question(self, "Clear List", "Remove all videos from the list? "
+        if self.batch.items and QMessageBox.question(self, "Clear All", "Remove all videos from the list? "
                                                      "Exported files are kept.") != QMessageBox.StandardButton.Yes:
             return
         old = self.batch
@@ -313,15 +519,43 @@ class BulkPage(QWidget):
         self.save()
         self.refresh()
 
+    def clear_completed(self) -> None:
+        """Remove finished videos from the list; their exported files stay where they are."""
+        done = [i for i in self.batch.items if self.status(i)[0] == "completed"]
+        self.batch.remove({i.id for i in done})
+        self.save()
+        self.refresh()
+        self.summary.setText(f"{len(done)} completed video(s) removed from the list; the exported files are kept.")
+
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
-        if paths:
-            self.add_paths(paths)
+        dropped = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        if dropped:
+            self.add_paths(dropped)
         event.acceptProposedAction()
+
+    # ------------------------------------------------------------------ ticking videos
+    def _on_item_changed(self, cell: QTableWidgetItem) -> None:
+        if self._filling or cell.column() != COL_CHECK:
+            return
+        item = self.batch.find(cell.data(Qt.ItemDataRole.UserRole))
+        if item is not None:
+            item.selected = cell.checkState() == Qt.CheckState.Checked
+            self.save()
+            self._update_summary()
+            self._update_buttons()
+
+    def set_selected(self, items: list[BatchItem], selected: bool) -> None:
+        for item in items:
+            item.selected = selected
+        self.save()
+        self.refresh()
+
+    def _on_select_all(self, checked: bool) -> None:
+        self.set_selected(self.batch.items, checked)
 
     # ------------------------------------------------------------------ settings and presets
     def _fill_presets(self, select: str | None = None) -> None:
@@ -342,9 +576,15 @@ class BulkPage(QWidget):
         name = self.selected_preset()
         if not name:
             return
-        self.editor.set_preset(self.services.render_presets.get(name))
+        try:
+            preset = self.services.render_presets.get(name)
+        except StudioError as exc:
+            QMessageBox.warning(self, "Load Preset", str(exc))
+            return
+        self.editor.set_preset(preset)
         self.batch.preset_name = name
         self._on_shared_changed()
+        self.summary.setText(f"Preset '{name}' loaded as the shared settings.")
 
     def use_shared_preset(self, preset) -> None:
         """Use settings made elsewhere (the Edit page) as the batch's shared settings."""
@@ -359,12 +599,12 @@ class BulkPage(QWidget):
         except StudioError as exc:
             QMessageBox.warning(self, "Save Preset", str(exc))
             return
-        name, ok = QInputDialog.getText(self, "Save as Preset", "Preset name:")
+        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
         if not ok or not name.strip():
             return
         store = self.services.render_presets
         if store.exists(name.strip()) and QMessageBox.question(
-                self, "Save as Preset", f"Replace the preset '{name.strip()}'?") != QMessageBox.StandardButton.Yes:
+                self, "Save Preset", f"Replace the preset '{name.strip()}'?") != QMessageBox.StandardButton.Yes:
             return
         try:
             saved = store.save(name, preset)
@@ -418,7 +658,8 @@ class BulkPage(QWidget):
     def _on_shared_changed(self) -> None:
         try:
             self.batch.shared = self.editor.preset()
-            self.settings_error.setText("")
+            self.settings_error.setText("" if self.editor.enabled_operations() else
+                                        "No editing operation is switched on: the videos are only re-encoded.")
         except StudioError as exc:
             self.settings_error.setText(f"⚠ {exc}")
             return
@@ -437,19 +678,21 @@ class BulkPage(QWidget):
         self.save()
         self.refresh()
 
-    def customize_selected(self) -> None:
-        items = self.selected_items()
-        if not items:
+    def apply_to_selected(self) -> None:
+        """Give the ticked videos (not yet started) their own copy of the current settings."""
+        try:
+            preset = self.editor.preset()
+        except StudioError as exc:
+            QMessageBox.warning(self, "Apply to Selected", str(exc))
             return
-        dialog = PresetDialog(self, f"Settings for {items[0].name}" + (f" and {len(items) - 1} more" if len(items) > 1
-                                                                        else ""), self.batch.effective(items[0]),
-                              caption_presets=self.services.presets)
-        if dialog.exec() != PresetDialog.DialogCode.Accepted:
-            return
-        for item in items:
-            item.override = dialog.result_preset.copy()
+        targets = [i for i in self.selected_items() if not self._active(i)]
+        for item in targets:
+            item.override = preset.copy()
         self.save()
         self.refresh()
+        ops = ", ".join(self.editor.enabled_operations()) or "no editing (re-encode only)"
+        self.summary.setText(f"Settings applied to {len(targets)} video(s): {ops}. Nothing starts until you click "
+                             "Start Batch.")
 
     def use_shared_for_selected(self) -> None:
         for item in self.selected_items():
@@ -470,7 +713,8 @@ class BulkPage(QWidget):
         self.summary.setText(f"All {len(self.batch.items)} video(s) use the shared settings.")
 
     def preview_selected(self) -> Job | None:
-        items = self.selected_items()
+        items = self.highlighted_items() or self.selected_items()
+        items = [i for i in items if i.metadata is not None]
         if not items:
             return None
         item = items[0]
@@ -485,9 +729,42 @@ class BulkPage(QWidget):
         self.summary.setText(f"Rendering a preview frame of {item.name}…")
         return job
 
+    def play_source(self, item: BatchItem) -> None:
+        SourcePreviewDialog(self, item.path, item.metadata.fps if item.metadata else None).exec()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self.editor.fill_caption_styles()  # caption presets may have changed on the Captions page
+
+    # ------------------------------------------------------------------ thumbnails
+    def _request_thumbnail(self, item: BatchItem) -> None:
+        if item.path in self._thumbs or item.metadata is None:
+            return
+        try:
+            stat = Path(item.path).stat()
+            ffmpeg = self.services.ffmpeg_path()
+        except (OSError, StudioError):
+            return
+        key = hashlib.sha1(f"{item.path}|{stat.st_size}|{stat.st_mtime}".encode()).hexdigest()[:20]
+        out = paths.temp_dir() / "thumbnails" / f"{key}.jpg"
+        self._thumbs[item.path] = QPixmap()  # requested
+        if out.is_file():
+            self._on_thumbnail(item.path, str(out))
+            return
+        at = min(max(0.0, item.metadata.duration * 0.1), 5.0)
+        self._thumb_pool.start(_ThumbJob(ffmpeg, item.path, at, out, self._thumb_signals))
+
+    def _on_thumbnail(self, video: str, image: str) -> None:
+        pixmap = QPixmap(image)
+        if pixmap.isNull():
+            return
+        self._thumbs[video] = pixmap.scaled(THUMB, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation)
+        for row in range(self.table.rowCount()):
+            cell = self.table.item(row, COL_VIDEO)
+            item = self.batch.find(cell.data(Qt.ItemDataRole.UserRole)) if cell else None
+            if item is not None and item.path == video:
+                self.table.item(row, COL_THUMB).setIcon(QIcon(self._thumbs[video]))
 
     # ------------------------------------------------------------------ status
     def status(self, item: BatchItem) -> tuple[str, float]:
@@ -508,89 +785,191 @@ class BulkPage(QWidget):
             return ("analyzing" if job.stage == "analyzing" else "rendering"), job.progress
         return job.state.value, (1.0 if job.state is JobState.COMPLETED else job.progress)
 
+    def status_text(self, item: BatchItem) -> str:
+        status, _p = self.status(item)
+        if status == "analyzing" and self.job(item) is None:
+            return "Reading…"
+        return STATUS_LABELS[status]
+
+    def details(self, item: BatchItem) -> str:
+        job = self.job(item)
+        if job is not None and job.state is JobState.FAILED:
+            return job.error or item.note
+        if job is not None and job.state is JobState.COMPLETED:
+            text = f"Saved: {item.output}" if item.output else ""
+            if job.result and job.result.get("warnings"):
+                text += ("  ·  " if text else "") + " ".join(job.result["warnings"])
+            return text
+        if job is not None and job.state is JobState.RUNNING:
+            return "Analysing (Smart Cut, captions or faces)…" if job.stage == "analyzing" else "Encoding the video…"
+        return item.note or item.error or ""
+
     def refresh(self) -> None:
-        selected = {i.id for i in self.selected_items()}
-        self.table.setRowCount(0)
-        for item in self.batch.items:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            self._fill_row(row, item)
-            if item.id in selected:
-                self.table.selectRow(row)
+        self._filling = True
+        try:
+            highlighted = {i.id for i in self.highlighted_items()}
+            self.table.setRowCount(0)
+            for item in self.batch.items:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self._fill_row(row, item)
+                if item.id in highlighted:
+                    self.table.selectRow(row)
+            self.table.setVisible(bool(self.batch.items))
+            self.empty_label.setVisible(not self.batch.items)
+            self.select_all.setChecked(bool(self.batch.items) and all(i.selected for i in self.batch.items))
+            self._fill_queue()
+        finally:
+            self._filling = False
         self._update_summary()
         self._update_buttons()
 
     def _fill_row(self, row: int, item: BatchItem) -> None:
-        status, progress = self.status(item)
-        job = self.job(item)
         meta = item.metadata
+        status = self.status(item)[0]
+        check = QTableWidgetItem()
+        check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        check.setCheckState(Qt.CheckState.Checked if item.selected else Qt.CheckState.Unchecked)
+        check.setData(Qt.ItemDataRole.UserRole, item.id)
+        self.table.setItem(row, COL_CHECK, check)
+        thumb = QTableWidgetItem()
+        if self._thumbs.get(item.path) is not None and not self._thumbs[item.path].isNull():
+            thumb.setIcon(QIcon(self._thumbs[item.path]))
+        self.table.setItem(row, COL_THUMB, thumb)
+        folder = str(Path(item.path).parent)
+        name = QTableWidgetItem(f"{item.name}\n{folder if len(folder) < 60 else '…' + folder[-58:]}")
+        name.setData(Qt.ItemDataRole.UserRole, item.id)
+        name.setToolTip(item.path)
+        self.table.setItem(row, COL_VIDEO, name)
+        try:
+            file_size = human_size(Path(item.path).stat().st_size)
+        except OSError:
+            file_size = "missing"
         preset = self.batch.effective(item)
         size = "-"
         if meta is not None:
             try:
                 w, h = output_size(preset, meta)
-                size = f"{meta.display_width}×{meta.display_height} → {w}×{h}"
+                size = f"{meta.display_width}×{meta.display_height}" + (
+                    f" → {w}×{h}" if (w, h) != (meta.display_width, meta.display_height) else "")
             except StudioError:
                 size = meta.resolution_text
-        note = item.note or item.error or ""
-        if job is not None and job.state is JobState.FAILED:
-            note = job.error or note
-        elif job is not None and job.state is JobState.COMPLETED and job.result and job.result.get("warnings"):
-            note = " ".join(job.result["warnings"])
-        values = [item.name, format_duration(meta.duration) if meta else "-", size,
-                  "Custom" if item.override else "Shared", Path(item.output).name if item.output else "",
-                  STATUS_LABELS[status], None, note]
-        for col, value in enumerate(values):
-            if value is None:
-                continue
+        values = {COL_DURATION: format_duration(meta.duration) if meta else "-", COL_RESOLUTION: size,
+                  COL_SIZE: file_size, COL_SETTINGS: "Own" if item.override else "Shared",
+                  COL_STATUS: self.status_text(item)}
+        for col, value in values.items():
             cell = QTableWidgetItem(value)
-            if col == 0:
-                cell.setData(Qt.ItemDataRole.UserRole, item.id)
-                cell.setToolTip(item.path)
-            if col == 7 and value:
-                cell.setToolTip(value)
-            if col == 5 and status == "failed":
-                cell.setForeground(Qt.GlobalColor.red)
+            if col == COL_SETTINGS:
+                cell.setToolTip("This video has its own settings (Apply to Selected)." if item.override else
+                                "This video follows the shared settings.")
+            if col == COL_STATUS:
+                cell.setToolTip(self.details(item))
+                if status in STATUS_COLORS:
+                    cell.setForeground(QColor(STATUS_COLORS[status]))
             self.table.setItem(row, col, cell)
-        bar = self.table.cellWidget(row, 6)
-        if not isinstance(bar, QProgressBar):
+        play = QToolButton()
+        play.setText("▶")
+        play.setToolTip("Play the original video")
+        play.setEnabled(Path(item.path).is_file())
+        play.clicked.connect(lambda _c=False, i=item.id: self.batch.find(i) and self.play_source(self.batch.find(i)))
+        self.table.setCellWidget(row, COL_PREVIEW, play)
+        remove = QToolButton()
+        remove.setText("✕")
+        remove.setToolTip("Remove from the list (the file is not deleted)")
+        remove.clicked.connect(lambda _c=False, i=item.id: self.batch.find(i) and self.remove_items([self.batch.find(i)]))
+        self.table.setCellWidget(row, COL_REMOVE, remove)
+        self._request_thumbnail(item)
+
+    def _fill_queue(self) -> None:
+        started = [i for i in self.batch.items if i.job_id or i.skipped]
+        self.queue_table.setRowCount(0)
+        for n, item in enumerate(started, 1):
+            row = self.queue_table.rowCount()
+            self.queue_table.insertRow(row)
+            status, progress = self.status(item)
+            number = QTableWidgetItem(str(n))
+            number.setData(Qt.ItemDataRole.UserRole, item.id)
+            self.queue_table.setItem(row, 0, number)
+            self.queue_table.setItem(row, 1, QTableWidgetItem(item.name))
             bar = QProgressBar()
             bar.setRange(0, 100)
-            self.table.setCellWidget(row, 6, bar)
-        bar.setValue(int(progress * 100))
+            bar.setValue(int(progress * 100))
+            self.queue_table.setCellWidget(row, 2, bar)
+            state = QTableWidgetItem(STATUS_LABELS[status])
+            if status in STATUS_COLORS:
+                state.setForeground(QColor(STATUS_COLORS[status]))
+            self.queue_table.setItem(row, 3, state)
+            detail = QTableWidgetItem(self.details(item))
+            detail.setToolTip(self.details(item))
+            self.queue_table.setItem(row, 4, detail)
+            action = QToolButton()
+            if status == "completed" and item.output:
+                action.setText("Show File")
+                action.clicked.connect(lambda _c=False, p=item.output: reveal_in_explorer(p))
+            elif status in ("failed", "cancelled") and self.job(item) is not None:
+                action.setText("Retry")
+                action.clicked.connect(lambda _c=False, i=item.id: self.retry_items([self.batch.find(i)]))
+            elif status in ("waiting", "held", "analyzing", "rendering"):
+                action.setText("Cancel")
+                action.clicked.connect(lambda _c=False, i=item.id: self.cancel_items([self.batch.find(i)]))
+            else:
+                action.setEnabled(False)
+                action.setText("—")
+            self.queue_table.setCellWidget(row, 5, action)
+
+    def queue_items(self) -> list[BatchItem]:
+        rows = sorted({i.row() for i in self.queue_table.selectionModel().selectedRows()})
+        return [self.batch.find(self.queue_table.item(r, 0).data(Qt.ItemDataRole.UserRole)) for r in rows
+                if self.queue_table.item(r, 0)]
 
     def _update_summary(self) -> None:
         statuses = [self.status(i) for i in self.batch.items]
         counts: dict[str, int] = {}
         for status, _p in statuses:
             counts[status] = counts.get(status, 0) + 1
+        selected = self.selected_items()
+        self.selected_label.setText(f"{len(selected)} of {len(self.batch.items)} videos selected")
+        out_bytes = 0
+        for item, (status, _p) in zip(self.batch.items, statuses):
+            if status == "completed" and item.output:
+                try:
+                    out_bytes += Path(item.output).stat().st_size
+                except OSError:
+                    pass
+        duration = sum(i.metadata.duration for i in selected if i.metadata)
+        values = {"Total videos": len(self.batch.items), "Selected": len(selected),
+                  "Completed": counts.get("completed", 0),
+                  "Processing": counts.get("rendering", 0) + sum(1 for i, (s, _p) in zip(self.batch.items, statuses)
+                                                                 if s == "analyzing" and self.job(i) is not None),
+                  "Waiting": counts.get("waiting", 0) + counts.get("held", 0),
+                  "Failed": counts.get("failed", 0) + counts.get("cancelled", 0),
+                  "Total duration": format_duration(duration), "Output size": human_size(out_bytes)}
+        for name, value in values.items():
+            self.counts[name].setText(str(value))
         started = [s for i, s in zip(self.batch.items, statuses) if i.job_id or i.skipped]
-        ready = counts.get("ready", 0)
-        parts = [f"{len(self.batch.items)} video(s)"]
-        parts += [f"{n} {STATUS_LABELS[k].lower()}" for k, n in counts.items()]
-        if ready:
-            parts.append(f"{ready} output file(s) will be created when you start")
-        self.summary.setText(" · ".join(parts))
         self.overall.setValue(int(item_progress(started) * 100))
 
     def _update_buttons(self) -> None:
-        items = self.selected_items()
+        selected = self.selected_items()
         jobs = [self.job(i) for i in self.batch.items]
         states = {j.state for j in jobs if j is not None}
-        selected_states = {j.state for j in (self.job(i) for i in items) if j is not None}
         builtin = bool(self.selected_preset()) and dict(self.services.render_presets.names()).get(
             self.selected_preset(), True)
-        self.remove_button.setEnabled(bool(items))
+        ready_ticked = [i for i in selected if self.status(i)[0] == "ready"]
+        self.remove_button.setEnabled(bool(selected))
         self.clear_button.setEnabled(bool(self.batch.items))
-        self.customize_button.setEnabled(bool(items))
-        self.shared_button.setEnabled(any(i.override for i in items))
+        self.apply_selected_button.setEnabled(bool(selected))
+        self.shared_button.setEnabled(any(i.override for i in selected))
         self.all_shared_button.setEnabled(any(i.override for i in self.batch.items))
-        self.preview_button.setEnabled(len(items) == 1 and items[0].metadata is not None and self._preview_job is None)
-        self.start_button.setEnabled(any(self.status(i)[0] == "ready" for i in self.batch.items))
+        self.preview_button.setEnabled(any(i.metadata is not None for i in (self.highlighted_items() or selected))
+                                       and self._preview_job is None)
+        self.start_button.setEnabled(bool(ready_ticked))
+        self.start_button.setText(f"▶  Start Batch ({len(ready_ticked)})" if ready_ticked else "▶  Start Batch")
         self.pause_button.setEnabled(JobState.QUEUED in states)
         self.resume_button.setEnabled(JobState.HELD in states)
-        self.cancel_button.setEnabled(bool(selected_states & ACTIVE))
+        self.cancel_button.setEnabled(any(self._active(i) for i in (self.queue_items() or selected)))
         self.retry_button.setEnabled(bool(states & {JobState.FAILED, JobState.CANCELLED}))
+        self.clear_completed_button.setEnabled(JobState.COMPLETED in states)
         self.open_button.setEnabled(bool(self.batch.output_dir) and Path(self.batch.output_dir).is_dir())
         self.update_preset_button.setEnabled(not builtin)
         self.rename_preset_button.setEnabled(not builtin)
@@ -653,6 +1032,7 @@ class BulkPage(QWidget):
         return settings
 
     def start(self) -> list[Job]:
+        """Queue one export job per ticked, ready video (they run one after another)."""
         out_dir = self.batch.output_dir
         if not out_dir:
             QMessageBox.warning(self, "Start Batch", "Choose an output folder first.")
@@ -662,7 +1042,7 @@ class BulkPage(QWidget):
         except OSError as exc:
             QMessageBox.warning(self, "Start Batch", f"The output folder cannot be created: {exc}")
             return []
-        ready = [i for i in self.batch.items if self.status(i)[0] == "ready"]
+        ready = [i for i in self.selected_items() if self.status(i)[0] == "ready"]
         if not ready:
             return []
         problems, planned = [], []
@@ -715,6 +1095,8 @@ class BulkPage(QWidget):
         self.refresh()
         if failures:
             QMessageBox.warning(self, "Start Batch", "Not started:\n\n" + "\n".join(failures))
+        self.summary.setText(f"{len(jobs)} video(s) added to the Export Queue; they are exported one after another."
+                             if jobs else self.summary.text())
         return jobs
 
     def _batch_jobs(self, states: set[JobState]) -> list[Job]:
@@ -733,9 +1115,9 @@ class BulkPage(QWidget):
             self.services.jobs.release(job.id)
         self.refresh()
 
-    def cancel_selected(self) -> None:
-        for item in self.selected_items():
-            job = self.job(item)
+    def cancel_items(self, items: list[BatchItem]) -> None:
+        for item in items:
+            job = self.job(item) if item is not None else None
             if job is not None and job.state in ACTIVE:
                 try:
                     self.services.jobs.cancel(job.id)
@@ -743,13 +1125,22 @@ class BulkPage(QWidget):
                     log.warning("Cancel failed", extra={"job_id": job.id, "error": str(exc)})
         self.refresh()
 
-    def retry_failed(self) -> None:
-        for job in self._batch_jobs({JobState.FAILED, JobState.CANCELLED}):
+    def cancel_selected(self) -> None:
+        self.cancel_items(self.queue_items() or self.selected_items())
+
+    def retry_items(self, items: list[BatchItem]) -> None:
+        for item in items:
+            job = self.job(item) if item is not None else None
+            if job is None or job.state not in (JobState.FAILED, JobState.CANCELLED):
+                continue
             output = job.payload.get("output")
             if output and path_key(output) in self.controller.active_outputs():
                 continue  # another job writes this file now
             self.services.jobs.retry(job.id)
         self.refresh()
+
+    def retry_failed(self) -> None:
+        self.retry_items(self.batch.items)
 
     def _on_job_changed(self, job: Job) -> None:
         if job.kind == RENDER_FRAME_JOB and job.id == self._preview_job and job.state.is_finished:
@@ -761,6 +1152,7 @@ class BulkPage(QWidget):
                                    note=note).exec()
             else:
                 self.summary.setText(f"⚠ Preview failed: {job.error or 'cancelled'}")
+            self._update_buttons()
             return
         if job.kind == PROBE_JOB and job.payload.get("batch_id") == self.batch.id and job.state.is_finished:
             item = self.batch.find(job.payload.get("batch_item", ""))
@@ -777,8 +1169,20 @@ class BulkPage(QWidget):
             item = self.batch.find(job.payload.get("batch_item", ""))
             if item is None:
                 return
-            for row in range(self.table.rowCount()):
-                if self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) == item.id:
-                    self._fill_row(row, item)
+            self._filling = True
+            try:
+                for row in range(self.table.rowCount()):
+                    if self.table.item(row, COL_VIDEO).data(Qt.ItemDataRole.UserRole) == item.id:
+                        self._fill_row(row, item)
+                self._fill_queue()
+            finally:
+                self._filling = False
             self._update_summary()
             self._update_buttons()
+
+
+def default_output_dir() -> str:
+    """A safe default output folder: "AI Video Studio" in the user's Videos folder."""
+    movies = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.MoviesLocation)
+    base = Path(movies) if movies else Path.home() / "Videos"
+    return str(base / "AI Video Studio")

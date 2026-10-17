@@ -224,6 +224,7 @@ class BatchItem:
     output: str | None = None
     note: str = ""
     skipped: bool = False
+    selected: bool = True     # ticked in the list: Start Batch and Apply to Selected use ticked videos
 
     @property
     def name(self) -> str:
@@ -232,7 +233,8 @@ class BatchItem:
     def to_dict(self) -> dict:
         return {"path": self.path, "id": self.id, "metadata": self.metadata.to_dict() if self.metadata else None,
                 "error": self.error, "override": self.override.to_dict() if self.override else None,
-                "job_id": self.job_id, "output": self.output, "note": self.note, "skipped": self.skipped}
+                "job_id": self.job_id, "output": self.output, "note": self.note, "skipped": self.skipped,
+                "selected": self.selected}
 
     @classmethod
     def from_dict(cls, d: dict) -> "BatchItem":
@@ -240,7 +242,7 @@ class BatchItem:
                    metadata=VideoMetadata.from_dict(d["metadata"]) if d.get("metadata") else None,
                    error=d.get("error"), override=RenderPreset.from_dict(d["override"]) if d.get("override") else None,
                    job_id=d.get("job_id"), output=d.get("output"), note=d.get("note", ""),
-                   skipped=bool(d.get("skipped")))
+                   skipped=bool(d.get("skipped")), selected=bool(d.get("selected", True)))
 
 
 @dataclass

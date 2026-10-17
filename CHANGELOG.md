@@ -8,6 +8,22 @@ Combined editing, bulk editing with shared settings, caption templates, speed an
 Project files become version 6 (new optional keys; version 1-5 files open unchanged).
 
 ### Added
+- **Bulk Processing page, new layout:**
+  - **Video list:** thumbnails, name and folder, duration, resolution, file size, settings (shared or
+    own), status, a play button for the original, remove, and tick boxes with "Select all".
+  - **Batch Edit Settings:** six cards, each with an on/off switch: Smart Cut, Auto Reframe, Captions
+    (style, automatic Whisper captions, font/size/colours/outline), Resize / Crop, Speed and Audio.
+  - **Apply to Selected:** gives the ticked videos their own copy of the settings without starting
+    anything.
+  - **Output Settings:** default folder "Videos/AI Video Studio", MP4, codec, encoder, quality,
+    frame rate and file name.
+  - **Processing Queue:** per-video progress, status, details, and Show File / Retry / Cancel.
+    Clear Completed removes finished videos from the list and keeps their files.
+  - **Batch Summary:** counts, total duration, output size, overall progress and Start Batch.
+
+  Jobs still go through the Edit page's export, one at a time by default.
+- **Exports are verified:** a finished file is read back with FFprobe before the job counts as
+  completed. An unreadable file is removed and the job fails with the reason.
 - **Edit page workspace:** a compact tool bar (Smart Cut, Captions, Resize / Crop, Auto Reframe,
   Speed, Audio, Final Export) opens each tool's settings in the right-hand panel, without leaving
   the page.

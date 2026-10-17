@@ -9,7 +9,7 @@ from ai_video_studio.render.layout import ResizeSettings
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.services import Services
 from ai_video_studio.ui.main_window import MainWindow
-from ai_video_studio.ui.pages.bulk import BulkPage
+from ai_video_studio.ui.pages.bulk import COL_RESOLUTION, COL_SETTINGS, COL_STATUS, BulkPage
 from tests.conftest import make_sample_video, requires_ffmpeg
 
 pytestmark = requires_ffmpeg
@@ -45,7 +45,7 @@ def small_preset(**kw) -> RenderPreset:
 
 
 def statuses(page):
-    return [page.table.item(r, 5).text() for r in range(page.table.rowCount())]
+    return [page.table.item(r, COL_STATUS).text() for r in range(page.table.rowCount())]
 
 
 def test_add_videos_status_and_settings(qtbot, window, videos, tmp_path):
@@ -57,15 +57,17 @@ def test_add_videos_status_and_settings(qtbot, window, videos, tmp_path):
     page.add_paths([str(videos[0].parent)])  # a folder: the second video is added, the first is known
     assert len(page.batch.items) == 2
     qtbot.waitUntil(lambda: statuses(page) == ["Ready", "Ready"], timeout=20000)
-    assert "→ 1080×1920" in page.table.item(0, 2).text()  # default shared settings
+    assert "→ 1080×1920" in page.table.item(0, COL_RESOLUTION).text()  # default shared settings
     assert page.start_button.isEnabled()
     page.editor.set_preset(small_preset())
     page._on_shared_changed()
     assert page.batch.shared.resize.width == 160
     page.batch.items[1].override = small_preset(filename_template="{original_name}_custom")
     page.refresh()
-    assert [page.table.item(r, 3).text() for r in range(2)] == ["Shared", "Custom"]
-    assert page.start() == []  # no output folder yet
+    assert [page.table.item(r, COL_SETTINGS).text() for r in range(2)] == ["Shared", "Own"]
+    page.output_dir.setText("")
+    page._on_output_changed()
+    assert page.start() == []  # no output folder
 
 
 def test_start_pause_resume_cancel_retry_and_conflicts(qtbot, window, videos, tmp_path):
@@ -83,11 +85,10 @@ def test_start_pause_resume_cancel_retry_and_conflicts(qtbot, window, videos, tm
     jobs = page.start()
     assert len(jobs) == 2 and statuses(page) == ["Waiting", "Waiting"]
     assert page.batch.items[0].output.endswith("one_160x160 (2).mp4")
-    assert "already exists" in page.table.item(0, 7).text()
+    assert "already exists" in page.details(page.batch.items[0])
     page.pause()
     assert statuses(page) == ["Waiting (paused)", "Waiting (paused)"]
-    page.table.selectRow(1)
-    page.cancel_selected()
+    page.cancel_items([page.batch.items[1]])
     assert statuses(page)[1] == "Cancelled"
     page.resume()
     window.services.jobs.resume()
@@ -101,7 +102,7 @@ def test_start_pause_resume_cancel_retry_and_conflicts(qtbot, window, videos, tm
     # The batch (with job links) is restored by a new page, e.g. after a restart.
     again = BulkPage(window.controller, window.bridge)
     assert [i.output for i in again.batch.items] == [i.output for i in page.batch.items]
-    assert [again.table.item(r, 5).text() for r in range(2)] == ["Completed", "Completed"]
+    assert [again.table.item(r, COL_STATUS).text() for r in range(2)] == ["Completed", "Completed"]
     again.deleteLater()
 
 

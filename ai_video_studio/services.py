@@ -93,7 +93,8 @@ class Services:
         self.jobs.register(REFRAME_EXPORT_JOB, make_reframe_export_handler(self.ffmpeg_path), heavy=True)
         self.jobs.register(REFRAME_PREVIEW_JOB, make_reframe_preview_handler(self.ffmpeg_path))
         self.jobs.register(SMARTCUT_ANALYZE_JOB, make_smartcut_analyze_handler(self.ffmpeg_path))
-        self.jobs.register(RENDER_JOB, make_render_handler(self.ffmpeg_path), heavy=True)
+        self.jobs.register(RENDER_JOB, make_render_handler(self.ffmpeg_path, get_ffprobe=self.ffprobe_path),
+                           heavy=True)
         self.jobs.register(RENDER_FRAME_JOB, make_render_frame_handler(self.ffmpeg_path))
         self.settings.subscribe(self._on_setting_changed)
 

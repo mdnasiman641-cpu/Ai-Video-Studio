@@ -23,7 +23,8 @@ from typing import Callable
 
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import MediaError, StudioError
-from ai_video_studio.core.fs import remove_tree
+from ai_video_studio.core.ffmpeg_tools import find_tool, probe_video
+from ai_video_studio.core.fs import remove_file, remove_tree
 from ai_video_studio.core.process import run_process, run_streaming
 from ai_video_studio.captions.models import ModelMissingError
 from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir, transcribe_video
@@ -211,8 +212,29 @@ def auto_captions(p: dict, job: Job, ctx: JobContext, ffmpeg: Path, model_factor
         result.warnings)
 
 
+def verify_output(output: Path, ffprobe: Path | None, expected_duration: float | None) -> None:
+    """Check that an export is a readable video before the job counts as completed."""
+    if ffprobe is None:
+        log.warning("FFprobe not found; the exported file was not verified", extra={"output": str(output)})
+        return
+    try:
+        meta = probe_video(output, ffprobe)
+    except StudioError as exc:
+        remove_file(output)
+        raise MediaError(f"The exported file could not be read back ({exc}); it was removed.") from exc
+    if not meta.width or not meta.height or (expected_duration and meta.duration < min(0.5, expected_duration) * 0.5):
+        remove_file(output)
+        raise MediaError("The exported file has no usable video stream; it was removed. Check the FFmpeg log in the "
+                         "logs folder.")
+
+
+def _sibling_ffprobe(ffmpeg: Path) -> Path | None:
+    candidate = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+    return candidate if candidate.is_file() else find_tool("ffprobe")
+
+
 def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, vad=None, model_factory=None,
-                        cuda_devices: int | None = None):
+                        cuda_devices: int | None = None, get_ffprobe: Callable[[], Path] | None = None):
     def handle(job: Job, ctx: JobContext) -> dict:
         p = job.payload
         source, output = Path(p["path"]), Path(p["output"])
@@ -307,6 +329,7 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
             remove_tree(folder)
             with _writing_lock:
                 _writing.discard(key)
+        verify_output(output, get_ffprobe() if get_ffprobe else _sibling_ffprobe(get_ffmpeg()), out_duration)
         log.info("Render finished", extra={"job_id": job.id, "encoder": codec, "cuts": len(ranges or []),
                                            "speed": effects.video_factor})
         return {"media_id": p.get("media_id"), "output": str(output), "encoder": codec,
