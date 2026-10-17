@@ -16,6 +16,7 @@ survives a restart or crash.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -67,6 +69,7 @@ from ai_video_studio.render.batch import (
     item_progress,
     output_name,
     output_size,
+    preset_summary,
 )
 from ai_video_studio.render.naming import CONFLICT_POLICIES, path_key, plan_outputs
 from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
@@ -74,7 +77,7 @@ from ai_video_studio.ui.caption_dialogs import FramePreviewDialog
 from ai_video_studio.ui.project_controller import JobBridge, ProjectController, expand_paths
 from ai_video_studio.ui.widgets.cards import TEAL
 from ai_video_studio.ui.widgets.common import muted, open_folder, reveal_in_explorer, section_title
-from ai_video_studio.ui.widgets.preset_editor import PresetEditor
+from ai_video_studio.ui.widgets.preset_editor import PresetDialog, PresetEditor
 from ai_video_studio.ui.widgets.video_preview import VideoPreview
 
 log = logging.getLogger(__name__)
@@ -164,6 +167,33 @@ class SourcePreviewDialog(QDialog):
         super().done(result)
 
 
+class BeforeAfterDialog(QDialog):
+    """The same frame without and with the colour grade / video filter, side by side."""
+
+    def __init__(self, parent: QWidget | None, before: str, after: str, name: str, label: str):
+        super().__init__(parent)
+        self.setWindowTitle(f"Before / After: {name}")
+        row = QHBoxLayout()
+        for title, image in (("Before (original colours)", before), (f"After ({label})", after)):
+            column = QVBoxLayout()
+            caption = QLabel(title)
+            caption.setObjectName("CardTitle")
+            picture = QLabel()
+            picture.setPixmap(QPixmap(image).scaled(620, 620, Qt.AspectRatioMode.KeepAspectRatio,
+                                                    Qt.TransformationMode.SmoothTransformation))
+            column.addWidget(caption)
+            column.addWidget(picture, 1)
+            row.addLayout(column)
+        layout = QVBoxLayout(self)
+        layout.addWidget(muted("One frame rendered by FFmpeg with the batch framing and captions, without and with "
+                               "the colour settings: the same filters the export uses. This is a preview; nothing "
+                               "is exported."))
+        layout.addLayout(row, 1)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(self.reject)
+        layout.addWidget(close)
+
+
 class BulkPage(QWidget):
     def __init__(self, controller: ProjectController, bridge: JobBridge):
         super().__init__()
@@ -176,6 +206,8 @@ class BulkPage(QWidget):
         self._thumb_pool.setMaxThreadCount(2)
         self._thumb_signals = _ThumbSignals()
         self._thumb_signals.ready.connect(self._on_thumbnail)
+        self._frame_cache: dict[str, str] = {}               # frame payload -> rendered image (Before / After)
+        self._compare_jobs: dict[str, tuple[str, str]] = {}  # job id -> (side, cache key)
         self._preview_job: str | None = None
         self._preview_notes: list[str] = []
         self.batch = self.services.batches.latest() or Batch()
@@ -249,14 +281,18 @@ class BulkPage(QWidget):
         list_layout.addWidget(self.empty_label)
 
         # -- batch edit settings --
-        self.editor = PresetEditor(self.batch.shared, caption_presets=self.services.presets)
+        self.editor = PresetEditor(self.batch.shared, caption_presets=self.services.presets,
+                                   color_presets=self.services.color_presets)
         self.apply_selected_button = QPushButton("Apply to Selected")
         self.apply_selected_button.setToolTip("Give the ticked videos their own copy of these settings. The others "
                                               "keep following the shared settings.")
-        self.shared_button = QPushButton("Use Shared Settings")
-        self.shared_button.setToolTip("The ticked videos follow the shared settings again.")
-        self.all_shared_button = QPushButton("Apply Shared Settings to All")
-        self.all_shared_button.setToolTip("Every video uses the shared settings (removes per-video settings).")
+        self.shared_button = QPushButton("Reset Selected Video Settings")
+        self.shared_button.setToolTip("The ticked videos lose their own settings and follow the shared settings "
+                                      "again.")
+        self.all_shared_button = QPushButton("Apply to All Videos")
+        self.all_shared_button.setToolTip("Every video uses these shared settings (removes per-video settings).")
+        self.edit_item_button = QPushButton("Edit Video Settings…")
+        self.edit_item_button.setToolTip("Edit the settings of the highlighted video only (it gets its own settings).")
         self.preview_button = QPushButton("Preview Settings")
         self.preview_button.setToolTip("Render one frame of the highlighted (or first ticked) video with its settings "
                                        "(framing and caption style), without exporting the video.")
@@ -267,7 +303,8 @@ class BulkPage(QWidget):
         srow = QHBoxLayout()
         srow.addWidget(section_title("Batch Edit Settings"))
         srow.addStretch(1)
-        for b in (self.preview_button, self.apply_selected_button, self.shared_button, self.all_shared_button):
+        for b in (self.preview_button, self.edit_item_button, self.apply_selected_button, self.shared_button,
+                  self.all_shared_button):
             srow.addWidget(b)
         settings_layout.addLayout(srow)
         settings_layout.addWidget(muted("These are the shared settings: every video uses them unless Apply to Selected "
@@ -397,6 +434,9 @@ class BulkPage(QWidget):
         self.shared_button.clicked.connect(self.use_shared_for_selected)
         self.all_shared_button.clicked.connect(self.apply_shared_to_all)
         self.preview_button.clicked.connect(self.preview_selected)
+        self.edit_item_button.clicked.connect(self.edit_item_settings)
+        self.editor.compare_button.clicked.connect(self.compare_colors)
+        self.table.cellDoubleClicked.connect(lambda row, _col: self.edit_item_settings())
         self.apply_preset_button.clicked.connect(self.apply_preset)
         self.save_preset_button.clicked.connect(self.save_preset)
         self.update_preset_button.triggered.connect(self.update_preset)
@@ -703,7 +743,7 @@ class BulkPage(QWidget):
     def apply_shared_to_all(self, confirm: bool = True) -> None:
         custom = [i for i in self.batch.items if i.override is not None]
         if custom and confirm and QMessageBox.question(
-                self, "Apply Shared Settings to All", f"{len(custom)} video(s) have their own settings. Use the "
+                self, "Apply to All Videos", f"{len(custom)} video(s) have their own settings. Use these "
                 "shared settings for every video?") != QMessageBox.StandardButton.Yes:
             return
         for item in custom:
@@ -711,6 +751,75 @@ class BulkPage(QWidget):
         self.save()
         self.refresh()
         self.summary.setText(f"All {len(self.batch.items)} video(s) use the shared settings.")
+
+    def edit_item_settings(self, item: BatchItem | None = None) -> bool:
+        """Edit one video's own settings in a dialog (the other videos are not changed)."""
+        item = item or next(iter(self.highlighted_items()), None)
+        if item is None:
+            self.summary.setText("Highlight a video in the list to edit its settings.")
+            return False
+        if self._active(item):
+            QMessageBox.information(self, "Edit Video Settings", f"{item.name} is being processed; its settings "
+                                    "cannot be changed now.")
+            return False
+        dialog = PresetDialog(self, f"Settings for {item.name}", self.batch.effective(item).copy(),
+                              caption_presets=self.services.presets, color_presets=self.services.color_presets)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        item.override = dialog.result_preset
+        self.save()
+        self.refresh()
+        self.summary.setText(f"{item.name} now has its own settings: "
+                             + (", ".join(preset_summary(item.override)) or "re-encode only") + ".")
+        return True
+
+    def frame_payloads_for_compare(self, item: BatchItem) -> tuple[dict, dict, list[str]]:
+        """Frame payloads without and with the colour settings (the same frame, framing and captions)."""
+        preset = self.batch.effective(item)
+        captions, style = self.captions_for(item)
+        after, notes = frame_preview_payload(item, preset, captions, style)
+        before = dict(after, color=None)
+        return before, after, notes
+
+    def compare_colors(self) -> list[Job]:
+        """Before / After: render one frame without and with the colour grade and filter (cached)."""
+        items = [i for i in (self.highlighted_items() or self.selected_items() or self.batch.items)
+                 if i.metadata is not None]
+        if not items:
+            self.summary.setText("Add a video first: the comparison uses one of its frames.")
+            return []
+        item = items[0]
+        try:
+            before, after, _notes = self.frame_payloads_for_compare(item)
+        except StudioError as exc:
+            QMessageBox.warning(self, "Before / After", str(exc))
+            return []
+        if not after.get("color"):
+            self.summary.setText("Switch on Color Grading or a Video Filter (above 0%) to compare.")
+            return []
+        self._compare = {"item": item.name, "before": None, "after": None,
+                         "label": ", ".join(self.batch.effective(item).color.summary())}
+        jobs = []
+        for side, payload in (("before", before), ("after", after)):
+            key = json.dumps(payload, sort_keys=True)
+            cached = self._frame_cache.get(key)
+            if cached and Path(cached).is_file():
+                self._compare[side] = cached
+                continue
+            job = self.services.jobs.submit(RENDER_FRAME_JOB, f"Colour comparison ({side}): {item.name}", payload)
+            self._compare_jobs[job.id] = (side, key)
+            jobs.append(job)
+        self.summary.setText(f"Rendering the Before / After frames of {item.name}…" if jobs else "")
+        self._show_compare()
+        return jobs
+
+    def _show_compare(self) -> None:
+        c = getattr(self, "_compare", None)
+        if not c or not c["before"] or not c["after"]:
+            return
+        self._compare = None
+        self.summary.setText("")
+        BeforeAfterDialog(self, c["before"], c["after"], c["item"], c["label"]).exec()
 
     def preview_selected(self) -> Job | None:
         items = self.highlighted_items() or self.selected_items()
@@ -860,8 +969,9 @@ class BulkPage(QWidget):
         for col, value in values.items():
             cell = QTableWidgetItem(value)
             if col == COL_SETTINGS:
-                cell.setToolTip("This video has its own settings (Apply to Selected)." if item.override else
-                                "This video follows the shared settings.")
+                cell.setToolTip(("This video has its own settings." if item.override else
+                                 "This video follows the shared settings.") + "\n" +
+                                ("\n".join(preset_summary(preset)) or "No editing: re-encode only."))
             if col == COL_STATUS:
                 cell.setToolTip(self.details(item))
                 if status in STATUS_COLORS:
@@ -1143,6 +1253,16 @@ class BulkPage(QWidget):
         self.retry_items(self.batch.items)
 
     def _on_job_changed(self, job: Job) -> None:
+        if job.kind == RENDER_FRAME_JOB and job.id in self._compare_jobs and job.state.is_finished:
+            side, key = self._compare_jobs.pop(job.id)
+            if job.state is JobState.COMPLETED and job.result and getattr(self, "_compare", None):
+                self._frame_cache[key] = job.result["image"]
+                self._compare[side] = job.result["image"]
+                self._show_compare()
+            elif job.state is not JobState.COMPLETED:
+                self._compare = None
+                self.summary.setText(f"⚠ Before / After failed: {job.error or 'cancelled'}")
+            return
         if job.kind == RENDER_FRAME_JOB and job.id == self._preview_job and job.state.is_finished:
             self._preview_job = None
             if job.state is JobState.COMPLETED and job.result:

@@ -80,6 +80,17 @@ def check_filter_filename(name: str) -> None:
         raise ValueError("filter file names must be plain file names")
 
 
+
+def subtitle_filter(subtitle_filename: str) -> str:
+    """The libass filter that burns in an ASS file.
+
+    The ``ass`` filter is used with complex text shaping (HarfBuzz): the ``subtitles`` filter
+    uses libass's simple shaping, which leaves Bengali conjuncts (যুক্তাক্ষর) unjoined and vowel
+    signs (কার) in the wrong place.
+    """
+    check_filter_filename(subtitle_filename)
+    return f"ass={subtitle_filename}:shaping=complex"
+
 def encode_args(
     ffmpeg: Path | str,
     source: str,
@@ -128,7 +139,7 @@ def burn_in_args(
     (see :func:`check_filter_filename`).
     """
     check_filter_filename(subtitle_filename)
-    return encode_args(ffmpeg, source, f"subtitles={subtitle_filename}", output, encoder,
+    return encode_args(ffmpeg, source, subtitle_filter(subtitle_filename), output, encoder,
                        source_audio_codec, has_audio)
 
 
@@ -143,7 +154,7 @@ def frame_preview_args(ffmpeg: Path | str, source: str, subtitle_filename: str, 
         str(ffmpeg), "-hide_banner", "-nostdin", "-y",
         "-i", str(source),
         "-ss", f"{max(0.0, at_seconds):.3f}",
-        "-vf", f"subtitles={subtitle_filename}",
+        "-vf", subtitle_filter(subtitle_filename),
         "-frames:v", "1", str(output_png),
     ]
 

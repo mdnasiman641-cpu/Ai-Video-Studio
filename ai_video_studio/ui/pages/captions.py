@@ -528,8 +528,8 @@ class CaptionsPage(QWidget):
         item = self.current()
         if item is None or item.captions is None:
             return
-        paint_segments(painter, rect, item.captions.active_at(self.preview.position_seconds()),
-                       item.effective_caption_style)
+        t = self.preview.position_seconds()
+        paint_segments(painter, rect, item.captions.active_at(t), item.effective_caption_style, t)
 
     # ------------------------------------------------------------------ style & presets
     def _load_style(self) -> None:

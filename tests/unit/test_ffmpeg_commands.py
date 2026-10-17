@@ -14,7 +14,7 @@ def test_audio_extract_args():
 def test_burn_in_args_libx264_copy_aac():
     enc = fc.EncoderSettings("libx264", 21)
     args = fc.burn_in_args("ffmpeg", "src.mp4", "captions.ass", "out.mp4", enc, "aac", True)
-    assert args[args.index("-vf") + 1] == "subtitles=captions.ass"
+    assert args[args.index("-vf") + 1] == "ass=captions.ass:shaping=complex"
     assert args[args.index("-crf") + 1] == "21"
     assert args[args.index("-c:a") + 1] == "copy"
     assert "0:a:0?" in args and args[-1] == "out.mp4"

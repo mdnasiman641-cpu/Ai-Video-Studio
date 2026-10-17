@@ -147,7 +147,7 @@ def test_srt_import_export_and_persistence(qtbot, window, tmp_path):
     path = tmp_path / "proj.avsproj"
     assert window._save(str(path))
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["version"] == 6 and data["media"][0]["caption_style"]["font_size"] == 77
+    assert data["version"] == 7 and data["media"][0]["caption_style"]["font_size"] == 77
     loaded = Project.load(path).media[0]
     assert [s.text for s in loaded.captions.segments] == ["বাংলা লাইন", "Second"]
     assert loaded.caption_style.vertical == "top"

@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from ai_video_studio.core.ffmpeg_commands import EncoderSettings, check_filter_filename, encode_args
+from ai_video_studio.core.ffmpeg_commands import EncoderSettings, check_filter_filename, encode_args, subtitle_filter
 from ai_video_studio.reframe.framing import CropPath
 
 CROP_COMMAND_FILE = "reframe.cmd"
@@ -68,7 +68,7 @@ def reframe_filter(path: CropPath, out_w: int, out_h: int, subtitle_file: str | 
     parts.append("setsar=1")
     if subtitle_file:
         check_filter_filename(subtitle_file)
-        parts.append(f"subtitles={subtitle_file}")
+        parts.append(subtitle_filter(subtitle_file))
     return ",".join(parts)
 
 
@@ -84,7 +84,7 @@ def reframe_frame_args(ffmpeg: Path | str, source: str, at_seconds: float, path:
     vf = [f"crop=w={path.crop_w}:h={path.crop_h}:x={x}:y={y}", f"scale={out_w}:{out_h}:flags=lanczos", "setsar=1"]
     if subtitle_file:
         check_filter_filename(subtitle_file)
-        vf.append(f"subtitles={subtitle_file}")
+        vf.append(subtitle_filter(subtitle_file))
     return [
         str(ffmpeg), "-hide_banner", "-nostdin", "-y",
         "-i", str(source),

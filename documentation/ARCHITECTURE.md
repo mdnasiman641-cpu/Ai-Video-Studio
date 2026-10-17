@@ -35,7 +35,7 @@ SRT file ───────────────────────�
          CaptionStyle ──► wrap_text (same line breaks everywhere)                        │
              │                     │                                                     │
              ▼                     ▼                                                     ▼
-   QPainter overlay (live)    build_ass ──► captions.ass ──ffmpeg subtitles=(libass)──► MP4
+   QPainter overlay (live)    build_ass ──► captions.ass ──ffmpeg ass=…:shaping=complex (libass)──► MP4
                                             (frame preview job renders 1 PNG the same way)
 ```
 
@@ -46,9 +46,11 @@ SRT file ───────────────────────�
 - **Background box** is drawn as a second ASS layer (`BorderStyle 3`, invisible text) under the
   normal outlined text, so the box and the outline can be used together.
 - **Shaping**: the overlay builds text from `QTextLayout` glyph runs, so complex scripts
-  (Bengali, Devanagari, Arabic) are shaped. libass shapes with HarfBuzz.
+  (Bengali, Devanagari, Arabic) are shaped. libass shapes with HarfBuzz: captions are burned in
+  with the `ass` filter and `shaping=complex` (the `subtitles` filter uses simple shaping, which
+  breaks Bengali conjuncts and vowel signs).
 - **Burn-in** runs FFmpeg with its working directory set to the job's temp folder and passes the
-  subtitle file as a bare name (`subtitles=captions.ass`). This avoids FFmpeg filter escaping of
+  subtitle file as a bare name (`ass=captions.ass:shaping=complex`). This avoids FFmpeg filter escaping of
   Windows paths.
 - **Encoder**: `choose_video_encoder` uses NVENC only after a real 0.2 s test encode succeeds
   (the result is cached). An export that fails on NVENC is retried with libx264.
@@ -74,7 +76,7 @@ Settings change (GUI thread, no decoding)
       desired position → zero-lag EMA → camera (dead zone, speed limit, transitions, keep-in-frame) → clamp
 Export (job reframe_export; payload = crop keyframes + output size + ASS text snapshot)
   reframe.export.sendcmd_script ──▶ reframe.cmd ; captions.ass      (job temp folder, plain names)
-  ffmpeg -vf sendcmd=f=reframe.cmd,crop=…,scale=W:H,setsar=1[,subtitles=captions.ass]
+  ffmpeg -vf sendcmd=f=reframe.cmd,crop=…,scale=W:H,setsar=1[,ass=captions.ass:shaping=complex]
       └─ jobs.encode.encode_with_fallback (NVENC after test encode, else libx264; .part → rename)
 ```
 
@@ -167,7 +169,10 @@ time, level, logger, message and context fields. Values whose keys look like sec
 - `render/pipeline.py` builds one `-filter_complex` graph:
   - `split`/`trim`/`setpts` and `asplit`/`atrim`/`asetpts` for each kept range, then `concat`;
   - a video stage on the joined timeline;
-  - `fps`, then `subtitles` on the final canvas;
+  - colour grade / video filter (`render/color.py`: `curves`, `colorchannelmixer`, `eq`,
+    `vignette`, `unsharp`, soft glow), after the framing;
+  - `fps`, then the captions (`ass`, with caption animations from `captions/animation.py`) on
+    the final canvas;
   - cut points snapped to the frame grid;
   - graphs longer than 6000 characters go to `-filter_complex_script` (Windows command-line
     limit).

@@ -27,6 +27,7 @@ from ai_video_studio.core.ffmpeg_tools import VideoMetadata
 from ai_video_studio.core.media import now_iso
 from ai_video_studio.reframe.framing import ASPECT_PRESETS
 from ai_video_studio.reframe.model import ReframeSettings
+from ai_video_studio.render.color import ColorSettings
 from ai_video_studio.render.effects import EditEffects
 from ai_video_studio.render.layout import PRESETS, ResizeSettings, compute_layout
 from ai_video_studio.render.naming import CONFLICT_POLICIES, render_name, validate_template
@@ -56,12 +57,19 @@ class RenderPreset:
     caption_style: CaptionStyle | None = None  # None = each video's own caption style
     auto_captions: bool = False          # burn-in: generate each video's captions with Whisper in its job
     effects: EditEffects = field(default_factory=EditEffects)
+    color: ColorSettings = field(default_factory=ColorSettings)  # colour grade and video filter
+    caption_animation: dict | None = None  # CaptionAnimation dict for every caption; None = no animation
 
     def validate(self) -> None:
         if self.operation not in OPERATIONS:
             raise BatchError(f"Unknown operation '{self.operation}'")
         self.smart_cut_settings.validate()
         self.effects.validate()
+        self.color.validate()
+        if self.caption_animation:
+            from ai_video_studio.captions.animation import CaptionAnimation
+
+            CaptionAnimation.from_dict(self.caption_animation, strict=True)
         if self.caption_style is not None:
             self.caption_style.validate()
         self.resize.validate()
@@ -83,7 +91,8 @@ class RenderPreset:
                 "output": self.output.to_dict(), "filename_template": self.filename_template,
                 "smart_cut": self.smart_cut, "smart_cut_settings": self.smart_cut_settings.to_dict(),
                 "caption_style": self.caption_style.to_dict() if self.caption_style else None,
-                "auto_captions": self.auto_captions, "effects": self.effects.to_dict()}
+                "auto_captions": self.auto_captions, "effects": self.effects.to_dict(), "color": self.color.to_dict(),
+                "caption_animation": dict(self.caption_animation) if self.caption_animation else None}
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "RenderPreset":
@@ -99,10 +108,21 @@ class RenderPreset:
                    filename_template=d.get("filename_template", "{original_name}_{resolution}"),
                    smart_cut=bool(d.get("smart_cut", False)), smart_cut_settings=cut_settings,
                    caption_style=CaptionStyle.from_dict(d["caption_style"]) if d.get("caption_style") else None,
-                   auto_captions=bool(d.get("auto_captions", False)), effects=EditEffects.from_dict(d.get("effects")))
+                   auto_captions=bool(d.get("auto_captions", False)), effects=EditEffects.from_dict(d.get("effects")),
+                   color=ColorSettings.from_dict(d.get("color")), caption_animation=_animation(d.get("caption_animation")))
 
     def copy(self) -> "RenderPreset":
         return RenderPreset.from_dict(json.loads(json.dumps(self.to_dict())))
+
+
+def _animation(data) -> dict | None:
+    """A stored caption animation; damaged or empty data gives no animation."""
+    from ai_video_studio.captions.animation import CaptionAnimation
+
+    if not isinstance(data, dict):
+        return None
+    animation = CaptionAnimation.from_dict(data)
+    return animation.to_dict() if animation.active else None
 
 
 def preset_from_edit(resize: ResizeSettings | None, *, use_cuts: bool, smart_cut_settings: SmartCutSettings,
@@ -370,7 +390,10 @@ def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwr
         "batch_id": batch_id, "batch_item": item.id,
         "effects": preset.effects.to_dict() if preset.effects.active else None,
         "captions_auto": dict(transcription) if auto else None,
+        "color": preset.color.to_dict() | {"height": h} if preset.color.active else None,
     }
+    if caption_data is not None and preset.caption_animation:
+        caption_data["animation"] = dict(preset.caption_animation)
     if preset.smart_cut:
         if not meta.has_audio:
             notes.append("Smart Cut skipped: the video has no audio track.")
@@ -440,7 +463,30 @@ def frame_preview_payload(item: BatchItem, preset: RenderPreset, captions: list[
         ass = build_ass(shown, style, w, h, title=item.name)
     if preset.effects.active:
         notes.append("Speed and audio effects are applied in the export (not visible in a still frame).")
-    return {"path": item.path, "media_id": None, "at": at, "stage": stage, "ass": ass}, notes
+    if preset.caption_animation and ass:
+        notes.append("Caption animations are shown in the export and in the animation preview, not in a still "
+                     "frame.")
+    return {"path": item.path, "media_id": None, "at": at, "stage": stage, "ass": ass,
+            "color": preset.color.to_dict() | {"height": h} if preset.color.active else None}, notes
+
+
+def preset_summary(preset: RenderPreset) -> list[str]:
+    """What a video's export will do, one short entry per switched-on operation (for review)."""
+    from ai_video_studio.captions.animation import CaptionAnimation
+
+    parts = []
+    if preset.smart_cut:
+        parts.append(f"Smart Cut (below {preset.smart_cut_settings.threshold_db:g} dB)")
+    if preset.operation == "reframe":
+        parts.append(f"Auto Reframe {PRESETS.get(preset.resize.preset, (preset.resize.preset,))[0]}")
+    elif preset.operation == "resize":
+        parts.append(f"Resize {PRESETS.get(preset.resize.preset, (preset.resize.preset,))[0]}, {preset.resize.mode}")
+    if preset.resize.burn_captions:
+        parts.append("Captions" + (" (automatic)" if preset.auto_captions else ""))
+        if preset.caption_animation:
+            parts.append("Animation: " + CaptionAnimation.from_dict(preset.caption_animation).summary())
+    parts += preset.effects.summary() + preset.color.summary()
+    return parts
 
 
 def item_progress(states: list[tuple[str, float]]) -> float:

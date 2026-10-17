@@ -29,7 +29,9 @@ PROJECT_FORMAT = "ai-video-studio-project"
 #       "resize" (output canvas settings); both optional, so version 1-4 files load unchanged
 #   6 - per-media "effects" (speed and audio effects) and per-caption "style" (both optional,
 #       so version 1-5 files load unchanged)
-PROJECT_VERSION = 6
+#   7 - per-caption "animation" (caption animations) and the caption style's "highlight_color"
+#       (both optional, so version 1-6 files load unchanged)
+PROJECT_VERSION = 7
 
 
 @dataclass

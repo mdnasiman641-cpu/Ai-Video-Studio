@@ -59,7 +59,7 @@ def test_reframe_filter_chain():
     assert reframe_filter(path, 1080, 1920) == (
         "sendcmd=f=reframe.cmd,crop=w=608:h=1080:x=0:y=0,scale=1080:1920:flags=lanczos,setsar=1")
     with_subs = reframe_filter(path, 1080, 1920, subtitle_file="captions.ass")
-    assert with_subs.endswith(",setsar=1,subtitles=captions.ass")  # captions rendered on the output frame
+    assert with_subs.endswith(",setsar=1,ass=captions.ass:shaping=complex")  # captions rendered on the output frame
     static = reframe_filter(path, 720, 1280, command_file=None)
     assert static.startswith("crop=w=608:h=1080:x=0:y=0,scale=720:1280")
     with pytest.raises(ValueError):
@@ -84,7 +84,7 @@ def test_reframe_args_keep_audio_and_use_selected_encoder():
 def test_frame_preview_args_use_the_crop_at_that_time():
     args = reframe_frame_args("ffmpeg", "in.mp4", 0.5, moving_path(), 1080, 1920, "captions.ass", "f.png")
     vf = args[args.index("-vf") + 1]
-    assert vf == "crop=w=608:h=1080:x=50:y=0,scale=1080:1920:flags=lanczos,setsar=1,subtitles=captions.ass"
+    assert vf == "crop=w=608:h=1080:x=50:y=0,scale=1080:1920:flags=lanczos,setsar=1,ass=captions.ass:shaping=complex"
     assert args[args.index("-ss") + 1] == "0.500" and args.index("-ss") > args.index("-i")
 
 
@@ -126,7 +126,7 @@ def test_project_saves_and_reopens_reframe_data(tmp_path):
     item.reframe = ReframeState(ReframeSettings(preset="1:1", target=1, switches=[[1.0, None]], zoom=1.3), analysis)
     path = project.save(tmp_path / "p.avsproj")
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["version"] == 6 and data["media"][0]["reframe"]["settings"]["preset"] == "1:1"
+    assert data["version"] == 7 and data["media"][0]["reframe"]["settings"]["preset"] == "1:1"
     loaded = Project.load(path).media[0]
     assert loaded.reframe.settings.target == 1 and loaded.reframe.settings.zoom == 1.3
     assert loaded.reframe.analysis.tracks[0].id == 1

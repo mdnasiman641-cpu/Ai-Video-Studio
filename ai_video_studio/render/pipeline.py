@@ -9,7 +9,7 @@ shorter. Timestamps inside the graph start at the beginning of the file (FFmpeg'
 input offset), the same time base the preview player and the audio analysis use.
 
 The **video stage** (resize layout or moving reframe crop) runs on the joined timeline, then
-the **speed** change (``setpts``; the frame rate is kept constant), and **subtitles** are
+the **colour grade / video filter** (``render.color``), the **speed** change (``setpts``; the frame rate is kept constant), and **subtitles** are
 rendered last, on the final canvas, from captions already remapped to the edited and retimed
 timeline. **Audio effects** (``render.effects``) follow the audio cuts in the same graph. Long graphs are written to a script file (``-filter_complex_script``) to stay
 below the Windows command-line length limit.
@@ -21,7 +21,7 @@ import math
 from pathlib import Path
 from typing import Callable
 
-from ai_video_studio.core.ffmpeg_commands import EncoderSettings, check_filter_filename
+from ai_video_studio.core.ffmpeg_commands import EncoderSettings, check_filter_filename, subtitle_filter
 from ai_video_studio.render.output import OutputSettings
 
 # video_stage(input_label, output_label) -> filter graph text (may contain several chains)
@@ -101,11 +101,14 @@ def build_filter_graph(
     video_filters: list[str] | None = None,
     source_fps: float | None = None,
     audio_filters: list[str] | None = None,
+    color_stage: VideoStage | None = None,
 ) -> tuple[str, str, str | None]:
     """Return ``(graph, video_label, audio_label)``; ``audio_label`` is None when audio is not filtered.
 
     ``video_filters`` (speed) run after the video stage; ``source_fps`` then keeps the frame rate
     constant when no ``target_fps`` is chosen. ``audio_filters`` run after the audio cuts.
+    ``color_stage`` (colour grade and video filter, ``render.color``) runs after the video stage,
+    so it grades the final framing and never the captions.
     """
     chains: list[str] = []
     video, audio = "0:v:0", None
@@ -128,6 +131,9 @@ def build_filter_graph(
     if video_stage is not None:
         chains.append(video_stage(video, "vstage"))
         video = "vstage"
+    if color_stage is not None:
+        chains.append(color_stage(video, "vcolor"))
+        video = "vcolor"
     if has_audio and audio_filters:
         chains.append(f"[{audio or '0:a:0'}]" + ",".join(audio_filters) + "[aout]")
         audio = "aout"
@@ -138,7 +144,7 @@ def build_filter_graph(
         tail.append(f"fps={source_fps:.6g}")
     if subtitle_file:
         check_filter_filename(subtitle_file)
-        tail.append(f"subtitles={subtitle_file}")
+        tail.append(subtitle_filter(subtitle_file))
     tail.append("setsar=1")
     chains.append(f"[{video}]" + ",".join(tail) + "[vout]")
     return ";".join(chains), "vout", audio

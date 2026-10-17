@@ -4,10 +4,51 @@ All notable changes are listed here. Versions follow semantic versioning.
 
 ## [Unreleased]
 
-Combined editing, bulk editing with shared settings, caption templates, speed and audio effects.
-Project files become version 6 (new optional keys; version 1-5 files open unchanged).
+Combined editing, bulk editing with shared settings, caption templates, speed and audio effects,
+colour grading, video filters and caption animations. Project files become version 7 (new
+optional keys; version 1-6 files open unchanged).
 
 ### Added
+- **Colour grading (Bulk Processing):**
+  - Looks: Original, Natural, Cinematic, Teal & Orange, Warm Film, Cool Cinematic, Vintage Film,
+    Moody Dark, Bright & Clean, Black & White and Custom.
+  - Manual sliders with values: exposure, contrast, saturation, temperature, tint, highlights,
+    shadows, gamma, fade, vignette, sharpening and teal & orange split toning.
+  - Reset, and your own looks: save, load, update and delete. They are stored in the settings, and
+    built-in looks always stay.
+  - Rendered with FFmpeg `eq`, per-channel `curves`, `colorchannelmixer`, `vignette` and `unsharp`,
+    after the framing and before the captions.
+- **Video filters (Bulk Processing):**
+  - None, Cinematic, Warm, Cool, Vintage, Retro, Black & White, Sepia, Fade, High Contrast, Soft
+    Contrast, Vibrant, Muted Colors, Dreamy Soft and Sharp & Clear.
+  - Intensity from 0 to 100 % scales the filter's adjustments; 0 % adds nothing.
+  - The filter is added to the colour grade as one set of adjustments, so nothing is applied twice.
+- **Before / After:** one frame of a batch video rendered by FFmpeg without and with the colour
+  settings, side by side. Results are cached.
+- **Caption animations (Edit page Captions tool → Animation tab, and a Bulk Processing card):**
+  - Entrance: Fade, Slide Left/Right/Up/Down, Zoom, Pop, Bounce, Elastic, Blur, Flip, Typewriter,
+    Word Reveal and Character Reveal.
+  - Exit: Fade, Slide, Zoom, Pop, Blur and Flip.
+  - Loop: Gentle Pulse, Scale Pulse, Bounce, Floating, Shake, Glow Pulse and Wobble.
+  - Word effects: Highlight Current Word, Word-by-Word Reveal, Word Pop, Karaoke Highlight and
+    Typewriter Reveal. They follow Whisper word times, with a defined fallback when a caption has
+    none.
+  - Durations, delay, intensity and loop speed.
+  - Apply to current, selected or all captions; clear, reset, copy and paste.
+  - Stored per caption; animations never run past their caption.
+  - Rendered by libass in the export (ASS override tags, one event per keyframe step).
+  - The player shows movement, scale, fade and rotation live. "Preview Animation" renders a short
+    clip with the export's captions file.
+  - Text reveals work on whole grapheme clusters, so Bengali conjuncts, vowel signs and ফলা stay
+    intact.
+- **Caption appearance templates:** Clean Pop, Cinematic Subtitle, Bold Social Media, Minimal
+  Subtitle, Karaoke Highlight, Dynamic Caption and Smooth Word Reveal. Caption styles gain a
+  highlight colour.
+- **Bulk Processing:**
+  - Edit Video Settings… (one video's own settings).
+  - Reset Selected Video Settings, and Apply to All Videos.
+  - The Settings column's tooltip lists everything each video's export will do.
+  - Switched-off cards collapse.
 - **Bulk Processing page, new layout:**
   - **Video list:** thumbnails, name and folder, duration, resolution, file size, settings (shared or
     own), status, a play button for the original, remove, and tick boxes with "Select all".
@@ -84,6 +125,12 @@ Project files become version 6 (new optional keys; version 1-5 files open unchan
   - Start Batch refuses with an explanation when the Whisper model is not installed. Models are
     never downloaded by a batch.
 - A damaged saved caption or bulk preset gives a clear message instead of an error.
+
+### Fixed
+- **Bengali captions are now shaped correctly in exports:** conjuncts (যুক্তাক্ষর) are joined and
+  vowel signs (কার) are placed correctly. Captions are burned in with FFmpeg's `ass` filter and
+  complex text shaping; the `subtitles` filter used libass's simple shaping. Line wrapping counts
+  grapheme clusters and never splits one.
 
 ## [0.7.1] - Unreleased
 

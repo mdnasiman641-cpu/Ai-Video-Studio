@@ -6,6 +6,7 @@ result uses the same line breaks as the live preview.
 
 from __future__ import annotations
 
+from ai_video_studio.captions.animation import CaptionAnimation, animated_events, animation_for
 from ai_video_studio.captions.model import CaptionSegment
 from ai_video_studio.captions.style import CaptionStyle, wrap_text
 
@@ -73,8 +74,11 @@ def _box_name(style_name: str) -> str:
 
 
 def build_ass(segments: list[CaptionSegment], style: CaptionStyle, width: int, height: int,
-              title: str = "AI Video Studio captions") -> str:
+              title: str = "AI Video Studio captions", animation: CaptionAnimation | dict | None = None) -> str:
+    """``animation``: the default for captions without their own (``captions.animation``)."""
     style.validate()
+    if isinstance(animation, dict):
+        animation = CaptionAnimation.from_dict(animation, strict=True)
     header = [
         "[Script Info]",
         f"Title: {title}",
@@ -106,8 +110,14 @@ def build_ass(segments: list[CaptionSegment], style: CaptionStyle, width: int, h
     events = []
     for seg in sorted(segments, key=lambda s: (s.start, s.end)):
         name, s = styles[repr(sorted(seg.style.items()))] if seg.style else ("Default", style)
-        text = r"\N".join(escape_ass_text(line) for line in caption_lines(seg.text, s))
+        lines = caption_lines(seg.text, s)
+        text = r"\N".join(escape_ass_text(line) for line in lines)
         if not text:
+            continue
+        anim = animation_for(seg, animation)
+        if anim is not None:  # animated: several events with override tags (replaces the style's fades)
+            events += animated_events(seg, s, anim, lines, width, height, name,
+                                      _box_name(name) if s.background else None, escape_ass_text, ass_time)
             continue
         if s.fade_in_ms or s.fade_out_ms:
             text = f"{{\\fad({int(s.fade_in_ms)},{int(s.fade_out_ms)})}}" + text

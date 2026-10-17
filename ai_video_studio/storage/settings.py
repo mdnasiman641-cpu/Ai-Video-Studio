@@ -49,6 +49,20 @@ def _output_settings_json(value: str) -> str | None:
     return None
 
 
+def _color_presets_json(value: str) -> str | None:
+    try:
+        from ai_video_studio.render.color import ColorSettings
+
+        data = json.loads(value or "{}")
+        if not isinstance(data, dict):
+            return "must be a mapping of preset names to colour values"
+        for name, values in data.items():
+            ColorSettings(grading=True, preset="custom", values=values).validate()
+    except (ValueError, TypeError, StudioError) as exc:
+        return f"invalid colour presets ({exc})"
+    return None
+
+
 def _float_range(low: float, high: float) -> Callable[[Any], str | None]:
     return lambda v: None if low <= v <= high else f"must be between {low:g} and {high:g}"
 
@@ -83,6 +97,8 @@ SETTINGS: dict[str, SettingSpec] = {
     "video_quality": SettingSpec(int, 20, "Video quality (CRF/CQ)", _int_range(10, 40)),
     # Last export settings used for edited exports (Smart Cut, Resize & Crop), as JSON
     "export_output_settings": SettingSpec(str, "", "Export settings", _output_settings_json),
+    # The user's own colour grading looks (name -> adjustment values), as JSON
+    "color_presets": SettingSpec(str, "{}", "Custom colour presets", _color_presets_json),
     # AI providers (Phase 7) are stored as profiles (ai/profiles.py). The earlier settings
     # ai_correction_provider, gemini_model, openai_model and ai_timeout_seconds are read once,
     # directly from the database, to create the first profiles.

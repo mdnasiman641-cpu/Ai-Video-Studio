@@ -132,7 +132,7 @@ def test_every_enabled_operation_is_in_the_exported_video(qtbot, window, tmp_pat
     # the FFmpeg filter graph: cuts → Auto Reframe crop (moving, sendcmd) → speed → captions; audio filters
     graph = graphs[-1]
     order = [graph.index(s) for s in ("concat=n=4", "sendcmd=f=", "scale=1080:1920", "setpts=PTS/1.25",
-                                      "subtitles=captions.ass")]
+                                      "ass=captions.ass:shaping=complex")]
     assert order == sorted(order), graph
     assert "atempo=1.25" in graph and "afftdn=nr=6" in graph and "volume=1.2" in graph
 

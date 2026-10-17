@@ -292,8 +292,8 @@ class EditPage(QWidget):
         item = self.current()
         if item is None or item.captions is None or not self.controller.final_operations(item.id)["burn_captions"]:
             return
-        paint_segments(painter, rect, item.captions.active_at(self.preview.position_seconds()),
-                       item.effective_caption_style)
+        t = self.preview.position_seconds()
+        paint_segments(painter, rect, item.captions.active_at(t), item.effective_caption_style, t)
 
     # ------------------------------------------------------------------ previews
     def preview_frame(self) -> Job | None:
@@ -309,6 +309,7 @@ class EditPage(QWidget):
         return job
 
     def _on_job_changed(self, job: Job) -> None:
+        self.panels["captions"].on_job_changed(job)
         if job.kind != RENDER_FRAME_JOB or job.id != self._frame_job or not job.state.is_finished:
             if job.payload.get("media_id") == self._current_id and job.state.is_finished:
                 self.reload()  # an analysis finished

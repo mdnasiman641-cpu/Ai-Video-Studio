@@ -39,7 +39,7 @@ def test_graph_with_cuts_uses_trim_atrim_and_concat_in_order():
     assert "[vs1]trim=start=2.000000:end=3.500000,setpts=PTS-STARTPTS[v1]" in graph
     assert "[as1]atrim=start=2.000000:end=3.500000,asetpts=PTS-STARTPTS[a1]" in graph
     assert "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vcut][acut]" in graph
-    assert graph.endswith("[vcut]fps=30,subtitles=captions.ass,setsar=1[vout]")
+    assert graph.endswith("[vcut]fps=30,ass=captions.ass:shaping=complex,setsar=1[vout]")
     assert (video, audio) == ("vout", "acut")
 
 

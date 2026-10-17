@@ -8,6 +8,7 @@ so the Captions page also offers an exact single-frame render made by FFmpeg.
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -22,6 +23,7 @@ from PySide6.QtGui import (
     QTextLayout,
 )
 
+from ai_video_studio.captions.animation import animation_for, state_at
 from ai_video_studio.captions.ass import caption_lines
 from ai_video_studio.captions.style import REFERENCE_HEIGHT, CaptionStyle
 
@@ -141,11 +143,39 @@ def paint_captions(painter: QPainter, rect: QRectF, texts: list[str], style: Cap
     painter.restore()
 
 
-def paint_segments(painter: QPainter, rect: QRectF, segments, default: CaptionStyle) -> None:
-    """Draw caption segments; a caption with its own style is drawn with it, as in the export."""
+def paint_segments(painter: QPainter, rect: QRectF, segments, default: CaptionStyle, t: float | None = None) -> None:
+    """Draw caption segments; a caption with its own style is drawn with it, as in the export.
+
+    With the playhead time ``t``, an animated caption is drawn in its animation state at that
+    time (movement, scale, opacity and rotation from the same keyframes as the export). Text
+    reveals and word highlights are shown in the export and in the rendered animation preview.
+    """
     groups: dict[str, tuple[CaptionStyle, list[str]]] = {}
     for seg in segments:
+        anim = animation_for(seg, None) if t is not None else None
+        if anim is not None:
+            paint_animated(painter, rect, seg, seg.style_or(default), anim, t)
+            continue
         key = repr(sorted(seg.style.items())) if seg.style else ""
         groups.setdefault(key, (seg.style_or(default), []))[1].append(seg.text)
     for style, texts in groups.values():
         paint_captions(painter, rect, texts, style)
+
+
+def paint_animated(painter: QPainter, rect: QRectF, seg, style: CaptionStyle, anim, t: float) -> None:
+    state = state_at(anim, seg.start, seg.end, t)
+    if state is None or state["o"] <= 0.001 or state["s"] <= 0.5:
+        return
+    ax = {"left": rect.left() + rect.width() * style.margin_h / 100, "center": rect.center().x(),
+          "right": rect.right() - rect.width() * style.margin_h / 100}[style.alignment]
+    ay = {"bottom": rect.bottom() - rect.height() * style.margin_v / 100, "middle": rect.center().y(),
+          "top": rect.top() + rect.height() * style.margin_v / 100}[style.vertical]
+    painter.save()
+    painter.setOpacity(painter.opacity() * state["o"])
+    painter.translate(ax + state["x"] * rect.width(), ay + state["y"] * rect.height())
+    painter.rotate(-state["rz"])  # ASS rotates counter-clockwise
+    k = state["s"] / 100
+    painter.scale(k, k * max(0.05, math.cos(math.radians(state["rx"]))))
+    painter.translate(-ax, -ay)
+    paint_captions(painter, rect, [seg.text], style)
+    painter.restore()

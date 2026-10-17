@@ -37,6 +37,7 @@ from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.jobs.reframe_jobs import run_tracking_analysis
 from ai_video_studio.reframe.framing import caption_band_from_style, compute_crop_path, resolve_output_size
 from ai_video_studio.reframe.model import ReframeSettings
+from ai_video_studio.render.color import ColorSettings
 from ai_video_studio.render.effects import EditEffects
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.render.pipeline import (
@@ -56,6 +57,7 @@ log = logging.getLogger(__name__)
 SMARTCUT_ANALYZE_JOB = "smartcut_analyze"
 RENDER_JOB = "render_video"
 RENDER_FRAME_JOB = "render_frame_preview"
+RENDER_CLIP_JOB = "render_clip_preview"
 
 _writing: set[str] = set()
 _writing_lock = threading.Lock()
@@ -147,15 +149,32 @@ def ffmpeg_filters(ffmpeg: Path) -> set[str]:
     return _filters_cache[key]
 
 
-def check_filters(ffmpeg: Path, effects: EditEffects) -> None:
+def check_filters(ffmpeg: Path, effects: EditEffects | None, color: ColorSettings | None = None) -> None:
     available = ffmpeg_filters(ffmpeg)
     if not available:
         return  # the list could not be read; FFmpeg itself reports a missing filter
-    missing = sorted(effects.required_filters() - available)
-    if missing:
-        raise StudioError("This FFmpeg build does not include the filter(s) " + ", ".join(missing) +
-                          " needed for the chosen speed or audio settings. Turn those settings off or use "
-                          "a full FFmpeg build.")
+    for needed, what in ((effects.required_filters() if effects else set(), "speed or audio"),
+                         (color.required_filters() if color else set(), "colour grading or video filter")):
+        missing = sorted(needed - available)
+        if missing:
+            raise StudioError("This FFmpeg build does not include the filter(s) " + ", ".join(missing) +
+                              f" needed for the chosen {what} settings. Turn those settings off or use "
+                              "a full FFmpeg build.")
+
+
+def color_for(p: dict) -> ColorSettings | None:
+    """The payload's colour grade / video filter, or None when nothing is applied."""
+    color = ColorSettings.from_dict(p.get("color"), strict=True) if p.get("color") else None
+    return color if color is not None and color.active else None
+
+
+def color_height(p: dict, stage_payload: dict | None) -> int:
+    """The output height (sizes the soft-glow blur like on a 1080p frame)."""
+    for value in ((p.get("color") or {}).get("height"), (stage_payload or {}).get("out_h"),
+                  ((stage_payload or {}).get("layout") or {}).get("out_h")):
+        if value:
+            return int(value)
+    return 1080
 
 
 def reframe_stage_for(p: dict, ctx: JobContext, ffmpeg: Path, detector_factory=None, vad=None,
@@ -247,8 +266,9 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
         settings = OutputSettings.from_dict(p.get("output_settings"))
         settings.validate()
         effects = EditEffects.from_dict(p.get("effects"), strict=True)
-        if effects.active:
-            check_filters(get_ffmpeg(), effects)
+        color = color_for(p)
+        if effects.active or color:
+            check_filters(get_ffmpeg(), effects if effects.active else None, color)
         duration = float(p.get("duration") or 0)
         fps = float(p.get("fps") or 0) or None
         ranges = p.get("keep_ranges")
@@ -277,6 +297,8 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
         mode, audio_notes = audio_plan(settings, has_audio, p.get("audio_codec"), bool(ranges), effects.changes_audio)
         notes += audio_notes + settings.notes(fps) + (["Speed and audio: " + ", ".join(effects.summary()) + "."]
                                                       if effects.summary() else [])
+        if color:
+            notes.append("Colour: " + ", ".join(color.summary()) + ".")
         stage_payload = p.get("stage")
         if p.get("reframe_auto") and not stage_payload:
             stage_payload, reframe_notes = reframe_stage_for(p, ctx, get_ffmpeg(), detector_factory, vad,
@@ -291,7 +313,7 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
                                        effects.video_factor)
             if segments:
                 ass = build_ass(segments, CaptionStyle.from_dict(c.get("style")), int(c["width"]), int(c["height"]),
-                                title=c.get("title") or "AI Video Studio captions")
+                                title=c.get("title") or "AI Video Studio captions", animation=c.get("animation"))
             elif p.get("captions_auto"):  # captions are required: never export without them
                 raise StudioError("Automatic captions: every caption is inside a part removed by Smart Cut, so "
                                   "there are no captions to burn in.")
@@ -314,7 +336,8 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
             graph, _video, audio_label = build_filter_graph(
                 keep_ranges=ranges, has_audio=has_audio and mode != "none", video_stage=stage,
                 subtitle_file=subtitle_file, target_fps=settings.target_fps(), video_filters=effects.video_filters(),
-                source_fps=fps, audio_filters=effects.audio_filters(out_duration) if mode == "filtered" else None)
+                source_fps=fps, audio_filters=effects.audio_filters(out_duration) if mode == "filtered" else None,
+                color_stage=color.graph(color_height(p, stage_payload)) if color else None)
             ctx.check_cancelled()
 
             def build(encoder, partial: str) -> list[str]:
@@ -331,7 +354,8 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
                 _writing.discard(key)
         verify_output(output, get_ffprobe() if get_ffprobe else _sibling_ffprobe(get_ffmpeg()), out_duration)
         log.info("Render finished", extra={"job_id": job.id, "encoder": codec, "cuts": len(ranges or []),
-                                           "speed": effects.video_factor})
+                                           "speed": effects.video_factor,
+                                           "color": ", ".join(color.summary()) if color else "none"})
         return {"media_id": p.get("media_id"), "output": str(output), "encoder": codec,
                 "warnings": warnings + notes, "duration": out_duration, "segments": len(ranges or []) or 1,
                 "batch_id": p.get("batch_id"), "batch_item": p.get("batch_item")}
@@ -352,8 +376,11 @@ def make_render_frame_handler(get_ffmpeg: Callable[[], Path]):
             if p.get("ass"):
                 subtitle_file = SUBTITLE_FILE
                 (folder / subtitle_file).write_text(p["ass"], encoding="utf-8")
+            color = color_for(p)
             graph, _v, _a = build_filter_graph(keep_ranges=None, has_audio=False, video_stage=stage,
-                                               subtitle_file=subtitle_file)
+                                               subtitle_file=subtitle_file,
+                                               color_stage=color.graph(color_height(p, p.get("stage")))
+                                               if color else None)
             args = [str(get_ffmpeg()), "-hide_banner", "-nostdin", "-y", "-i", str(p["path"]),
                     "-ss", f"{max(0.0, float(p['at'])):.3f}", "-filter_complex", graph, "-map", "[vout]",
                     "-frames:v", "1", str(output)]
@@ -366,6 +393,51 @@ def make_render_frame_handler(get_ffmpeg: Callable[[], Path]):
         finally:
             remove_tree(folder)
         return {"media_id": p.get("media_id"), "image": str(output), "at": p["at"]}
+
+    return handle
+
+
+def make_render_clip_handler(get_ffmpeg: Callable[[], Path]):
+    """Render a short, small preview clip with burned-in captions (caption animation preview).
+
+    ``ass`` is timed from the clip start and sized for ``height``; the clip is written to the
+    temp folder (never next to the source) and is a preview, not an export.
+    """
+
+    def handle(job: Job, ctx: JobContext) -> dict:
+        p = job.payload
+        start, end = max(0.0, float(p["start"])), float(p["end"])
+        if end - start <= 0.05:
+            raise StudioError("The preview clip is too short.")
+        source = Path(p["path"])
+        if not source.is_file():
+            raise MediaError(f"Source video not found: {source}")
+        height = max(2, int(p.get("height") or 540) // 2 * 2)
+        folder = job_temp_dir(job)
+        previews = paths.temp_dir() / "previews"
+        previews.mkdir(parents=True, exist_ok=True)
+        output = previews / f"clip-{job.id}.mp4"
+        try:
+            (folder / SUBTITLE_FILE).write_text(p["ass"], encoding="utf-8")
+            color = color_for(p)
+            stage = lambda src, dst: f"[{src}]scale=-2:{height}[{dst}]"  # noqa: E731
+            graph, _v, _a = build_filter_graph(keep_ranges=None, has_audio=False, video_stage=stage,
+                                               subtitle_file=SUBTITLE_FILE,
+                                               color_stage=color.graph(height) if color else None)
+            args = [str(get_ffmpeg()), "-hide_banner", "-nostdin", "-y", "-ss", f"{start:.3f}", "-i", str(source),
+                    "-t", f"{end - start:.3f}", "-filter_complex", graph, "-map", "[vout]", "-map", "0:a:0?",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-b:a", "128k", str(output)]
+            try:
+                result = run_process(args, timeout=300, cancel_event=ctx.cancel_event, cwd=str(folder))
+            except subprocess.TimeoutExpired as exc:
+                raise StudioError("The preview clip timed out.") from exc
+            if result.returncode != 0 or not output.is_file():
+                remove_file(output)
+                raise StudioError(f"Preview clip failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
+        finally:
+            remove_tree(folder)
+        return {"media_id": p.get("media_id"), "clip": str(output), "start": start}
 
     return handle
 

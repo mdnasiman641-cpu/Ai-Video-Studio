@@ -74,7 +74,7 @@ def test_all_operations_in_one_export_keep_sync(manager, clip, tmp_path, graphs)
     job = run_job(manager, RENDER_JOB, payload)
     assert job.state is JobState.COMPLETED, job.error
     graph = graphs[-1]
-    order = [graph.index(s) for s in ("concat=n=", "boxblur", "setpts=PTS/2", f"fps={FPS}", "subtitles=")]
+    order = [graph.index(s) for s in ("concat=n=", "boxblur", "setpts=PTS/2", f"fps={FPS}", "ass=captions.ass")]
     assert order == sorted(order)  # cuts → resize → speed → constant frame rate → captions
     assert "atempo=2" in graph and "volume=1.5" in graph and "bass=g=3" in graph and "afade=t=in" in graph
     assert any("Smart Cut removed" in w for w in job.result["warnings"])

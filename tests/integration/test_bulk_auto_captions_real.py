@@ -73,9 +73,9 @@ def spy(monkeypatch):
     seen = []
     original = render_jobs.build_ass
 
-    def build(segments, style, width, height, title=""):
+    def build(segments, style, width, height, title="", animation=None):
         seen.append({"title": title, "segments": [(s.start, s.end, s.text) for s in segments], "style": style})
-        return original(segments, style, width, height, title=title)
+        return original(segments, style, width, height, title=title, animation=animation)
 
     monkeypatch.setattr(render_jobs, "build_ass", build)
     return seen

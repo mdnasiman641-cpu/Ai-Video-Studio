@@ -46,6 +46,7 @@ class CaptionStyle:
     max_lines: int = 2
     fade_in_ms: int = 0            # caption animation: fade in/out (ASS \fad), 0 = off
     fade_out_ms: int = 0
+    highlight_color: str = "#FFE600"  # word highlight / karaoke colour (caption animations)
 
     def validate(self) -> None:
         errors = []
@@ -53,7 +54,7 @@ class CaptionStyle:
             errors.append("Font is required")
         if not 8 <= self.font_size <= 300:
             errors.append("Font size must be between 8 and 300")
-        for name in ("text_color", "outline_color", "shadow_color", "background_color"):
+        for name in ("text_color", "outline_color", "shadow_color", "background_color", "highlight_color"):
             if not _HEX.match(getattr(self, name)):
                 errors.append(f"{name.replace('_', ' ').capitalize()} must look like #RRGGBB")
         if not 0 <= self.outline_width <= 20:
@@ -127,42 +128,67 @@ BUILTIN_PRESETS: dict[str, CaptionStyle] = {
                                  max_chars_per_line=18, fade_in_ms=150, fade_out_ms=150),
     "Large Readable": CaptionStyle(font_size=90, outline_width=5, background=True, background_opacity=55,
                                    max_chars_per_line=24, margin_v=10),
+    # Appearance templates for animated captions (the animation itself is chosen separately)
+    "Clean Pop": CaptionStyle(font_size=76, outline_width=4, shadow_offset=3, shadow_opacity=50, vertical="middle",
+                              margin_v=0, max_chars_per_line=22),
+    "Cinematic Subtitle": CaptionStyle(font_size=50, bold=False, outline_width=1.5, shadow_offset=2,
+                                       shadow_opacity=80, margin_v=7, max_chars_per_line=44),
+    "Bold Social Media": CaptionStyle(font_size=88, text_color="#FFFFFF", outline_width=7, shadow_offset=4,
+                                      shadow_opacity=70, vertical="middle", max_chars_per_line=16,
+                                      highlight_color="#39FF6A"),
+    "Minimal Subtitle": CaptionStyle(font_size=46, bold=False, outline_width=0, shadow_offset=1.5,
+                                     shadow_opacity=60, background=True, background_opacity=45,
+                                     background_padding=8, max_chars_per_line=46),
+    "Karaoke Highlight": CaptionStyle(font_size=72, outline_width=5, shadow_offset=2, max_chars_per_line=26,
+                                      margin_v=12, highlight_color="#FFE600"),
+    "Dynamic Caption": CaptionStyle(font_size=82, text_color="#FFFFFF", outline_color="#1A1A1A", outline_width=6,
+                                    vertical="middle", max_chars_per_line=18, highlight_color="#FF4FD8"),
+    "Smooth Word Reveal": CaptionStyle(font_size=66, bold=False, outline_width=2, shadow_offset=3,
+                                       shadow_opacity=75, max_chars_per_line=30, margin_v=10,
+                                       highlight_color="#7FE7FF"),
 }
 
 
 def wrap_text(text: str, max_chars: int, max_lines: int | None = None) -> list[str]:
     """Greedy word wrap that keeps existing line breaks.
 
-    Words longer than ``max_chars`` (or scripts without spaces) are split by characters.
-    If ``max_lines`` is set and exceeded, the line width is increased until it fits,
-    so no text is ever dropped.
+    Lengths are counted in grapheme clusters (what a reader sees as one character), so a
+    Bengali conjunct or a letter with its vowel sign counts once and is never split. Words
+    longer than ``max_chars`` (or scripts without spaces) are split between clusters. If
+    ``max_lines`` is set and exceeded, the line width is increased until it fits, so no text
+    is ever dropped.
     """
+    from ai_video_studio.captions.animation import graphemes
+
     def wrap(width: int) -> list[str]:
         lines: list[str] = []
         for paragraph in text.split("\n"):
-            current = ""
+            current, current_len = "", 0
             for word in paragraph.split():
-                while len(word) > width:
+                clusters = graphemes(word)
+                while len(clusters) > width:
                     if current:
                         lines.append(current)
-                        current = ""
-                    lines.append(word[:width])
-                    word = word[width:]
+                        current, current_len = "", 0
+                    lines.append("".join(clusters[:width]))
+                    clusters = clusters[width:]
+                word, n = "".join(clusters), len(clusters)
                 if not current:
-                    current = word
-                elif len(current) + 1 + len(word) <= width:
-                    current += " " + word
+                    current, current_len = word, n
+                elif current_len + 1 + n <= width:
+                    current, current_len = current + " " + word, current_len + 1 + n
                 else:
                     lines.append(current)
-                    current = word
+                    current, current_len = word, n
             if current:
                 lines.append(current)
         return lines
 
     width = max(1, max_chars)
     lines = wrap(width)
+    total = len(graphemes(text))
     if max_lines:
-        while len(lines) > max_lines and width < len(text):
+        while len(lines) > max_lines and width < total:
             width += 4
             lines = wrap(width)
     return lines

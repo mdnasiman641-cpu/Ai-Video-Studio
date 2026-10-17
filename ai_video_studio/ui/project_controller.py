@@ -30,7 +30,7 @@ from ai_video_studio.jobs.ai_jobs import AI_TITLES_JOB
 from ai_video_studio.jobs.handlers import PROBE_JOB
 from ai_video_studio.jobs.models import Job, JobState
 from ai_video_studio.jobs.reframe_jobs import REFRAME_ANALYZE_JOB, REFRAME_EXPORT_JOB, REFRAME_PREVIEW_JOB
-from ai_video_studio.jobs.render_jobs import RENDER_FRAME_JOB, RENDER_JOB, SMARTCUT_ANALYZE_JOB, output_key
+from ai_video_studio.jobs.render_jobs import RENDER_CLIP_JOB, RENDER_FRAME_JOB, RENDER_JOB, SMARTCUT_ANALYZE_JOB, output_key
 from ai_video_studio.render.effects import EditEffects
 from ai_video_studio.render.layout import Layout, LayoutError, ResizeSettings, compute_layout, layout_notes
 from ai_video_studio.render.output import OutputSettings
@@ -772,6 +772,35 @@ class ProjectController(QObject):
             ass = build_ass(item.captions.segments, item.effective_caption_style, *canvas, title=item.name)
         payload = {"path": item.path, "media_id": media_id, "at": at_seconds, "stage": stage, "ass": ass}
         return self.services.jobs.submit(RENDER_FRAME_JOB, f"Final frame preview: {item.name}", payload,
+                                         project_id=self.project.id)
+
+    def submit_animation_preview(self, media_id: str, segment_id: str, animation: dict | None = None,
+                                 height: int = 540) -> Job:
+        """Render a short clip of one caption (with its neighbours) exactly as libass draws it in the
+        export, on the source frame scaled to ``height``. ``animation`` previews unapplied settings
+        on that caption (``None`` = the captions' saved animations)."""
+        item = self.media(media_id)
+        if item.metadata is None or not item.captions:
+            raise StudioError("This video has no captions yet.")
+        target = item.captions.find(segment_id)
+        meta = item.metadata
+        start = max(0.0, target.start - 0.4)
+        end = min(meta.duration or target.end + 0.4, target.end + 0.4)
+        segments = []
+        for seg in item.captions.segments:
+            if seg.end > start and seg.start < end:
+                copy = CaptionSegment.from_dict(seg.to_dict())
+                if seg.id == segment_id and animation is not None:
+                    copy.animation = dict(animation)
+                copy.start, copy.end = round(seg.start - start, 3), round(seg.end - start, 3)
+                for w in copy.words:
+                    w.start, w.end = round(w.start - start, 3), round(w.end - start, 3)
+                segments.append(copy)
+        height = max(2, min(height, meta.display_height) // 2 * 2)
+        width = max(2, round(meta.display_width * height / meta.display_height / 2) * 2)
+        ass = build_ass(segments, item.effective_caption_style, width, height, title=item.name)
+        payload = {"path": item.path, "media_id": media_id, "start": start, "end": end, "ass": ass, "height": height}
+        return self.services.jobs.submit(RENDER_CLIP_JOB, f"Caption animation preview: {item.name}", payload,
                                          project_id=self.project.id)
 
     def update_resize(self, media_id: str, **changes) -> ResizeSettings:

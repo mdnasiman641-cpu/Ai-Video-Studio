@@ -394,6 +394,8 @@ class SettingsPage(QWidget):
             "video_encoder": self.video_encoder.currentData(),
             "video_quality": self.video_quality.value(),
             "export_output_settings": self._output_json(),
+            # edited on the Bulk Processing page (Color Grading); passed through unchanged
+            "color_presets": self.services.settings.get("color_presets"),
         } | {key: self.tracking.values()[field] for key, field in REFRAME_DEFAULT_KEYS.items()}
 
     def _output_json(self) -> str:

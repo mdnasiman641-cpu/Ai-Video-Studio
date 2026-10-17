@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
-    QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -30,10 +30,12 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from ai_video_studio.captions.animation import CaptionAnimation
 from ai_video_studio.captions.model import CaptionError, CaptionTrack, format_clock, parse_clock
 from ai_video_studio.core.errors import StudioError
 from ai_video_studio.core.media import MediaItem, format_duration
@@ -43,6 +45,7 @@ from ai_video_studio.reframe.model import TRACKING_MODES
 from ai_video_studio.render.layout import MODES, PRESETS
 from ai_video_studio.render.pipeline import kept_duration
 from ai_video_studio.smartcut.model import SmartCutSettings
+from ai_video_studio.ui.widgets.caption_animation import AnimationEditor
 from ai_video_studio.ui.widgets.caption_style_editor import CaptionStyleEditor
 from ai_video_studio.ui.widgets.caption_templates import CaptionTemplateGrid
 from ai_video_studio.ui.widgets.common import muted, section_title
@@ -241,13 +244,55 @@ class CaptionsPanel(ToolPanel):
         apply_row = QHBoxLayout()
         apply_row.addWidget(self.apply_selected_button)
         apply_row.addWidget(self.apply_all_button)
-        style_box = QGroupBox("Video caption style")
-        QVBoxLayout(style_box).addWidget(self.style_editor)
-        for w in (self.burn, row, self.status, self.table, edit_row, QLabel("Templates:"), self.templates, apply_row,
-                  style_box):
-            (self.body.addLayout if isinstance(w, QHBoxLayout) else self.body.addWidget)(w)
-        self.body.addWidget(muted("Double-click a cell to edit the text or the time (mm:ss.mmm). Split, merge, undo "
-                                  "and AI checks are on the Captions page."))
+        self.animation = AnimationEditor()
+        self.anim_current_button = QPushButton("Apply to Current Caption")
+        self.anim_selected_button = QPushButton("Apply to Selected")
+        self.anim_all_button = QPushButton("Apply to All Captions")
+        self.anim_clear_button = QPushButton("Clear Animation")
+        self.anim_reset_button = QPushButton("Reset")
+        self.anim_copy_button = QPushButton("Copy")
+        self.anim_paste_button = QPushButton("Paste")
+        self.anim_preview_button = QPushButton("▶ Preview Animation")
+        self.anim_preview_button.setObjectName("Teal")
+        self.anim_status = muted("")
+        self.anim_status.setWordWrap(True)
+        self._clipboard: dict | None = None
+        self._preview_job: str | None = None
+
+        self.tabs = QTabWidget()
+        text_tab = QWidget()
+        text = QVBoxLayout(text_tab)
+        for w in (self.burn, row, self.status, self.table, edit_row):
+            (text.addLayout if isinstance(w, QHBoxLayout) else text.addWidget)(w)
+        text.addWidget(muted("Double-click a cell to edit the text or the time (mm:ss.mmm). Split, merge, undo "
+                             "and AI checks are on the Captions page."))
+        templates_tab = QWidget()
+        templates = QVBoxLayout(templates_tab)
+        templates.addWidget(muted("Appearance templates: font, size, colours, outline, box, shadow and position. "
+                                  "Animations are chosen on the Animation tab."))
+        templates.addWidget(self.templates)
+        templates.addLayout(apply_row)
+        templates.addStretch(1)
+        style_tab = QWidget()
+        QVBoxLayout(style_tab).addWidget(self.style_editor)
+        anim_tab = QWidget()
+        anim = QVBoxLayout(anim_tab)
+        anim.addWidget(self.animation)
+        grid = QGridLayout()
+        for n, b in enumerate((self.anim_current_button, self.anim_selected_button, self.anim_all_button,
+                               self.anim_clear_button, self.anim_copy_button, self.anim_paste_button,
+                               self.anim_reset_button, self.anim_preview_button)):
+            grid.addWidget(b, n // 2, n % 2)
+        anim.addLayout(grid)
+        anim.addWidget(self.anim_status)
+        anim.addWidget(muted("The player shows movement, scale, fades and rotation live. Text reveals and word "
+                             "highlights appear in the export; use Preview Animation to see the exact result."))
+        anim.addStretch(1)
+        self.tabs.addTab(text_tab, "Text")
+        self.tabs.addTab(templates_tab, "Templates")
+        self.tabs.addTab(style_tab, "Style")
+        self.tabs.addTab(anim_tab, "Animation")
+        self.body.addWidget(self.tabs)
         self.burn.toggled.connect(lambda on: self.guarded(lambda: self.controller.update_resize(
             self.media_id(), burn_captions=on, burn_set=True)))
         self.generate_button.clicked.connect(lambda: self.page.captions_action("generate"))
@@ -262,6 +307,15 @@ class CaptionsPanel(ToolPanel):
         self.style_editor.style_changed.connect(
             lambda style: self.guarded(lambda: self.controller.set_caption_style([self.media_id()], style)))
         self.reload_templates()
+        self.anim_current_button.clicked.connect(self.animate_current)
+        self.anim_selected_button.clicked.connect(self.animate_selected)
+        self.anim_all_button.clicked.connect(self.animate_all)
+        self.anim_clear_button.clicked.connect(self.clear_animation)
+        self.anim_reset_button.clicked.connect(lambda: self.animation.set_animation(None))
+        self.anim_copy_button.clicked.connect(self.copy_animation)
+        self.anim_paste_button.clicked.connect(self.paste_animation)
+        self.anim_preview_button.clicked.connect(self.preview_animation)
+        self.table.itemSelectionChanged.connect(self._show_selected_animation)
 
     def reload_templates(self) -> None:
         presets = self.controller.services.presets
@@ -291,8 +345,9 @@ class CaptionsPanel(ToolPanel):
                 cell = QTableWidgetItem(value)
                 if col == 0:
                     cell.setData(Qt.ItemDataRole.UserRole, seg.id)
-                if col == 2 and seg.style:
-                    cell.setToolTip("This caption has its own style.")
+                if col == 2 and (seg.style or seg.animation):
+                    cell.setToolTip(" ".join(t for t, on in (("This caption has its own style.", seg.style),
+                                                             ("It has its own animation.", seg.animation)) if on))
                 self.table.setItem(r, col, cell)
             if seg.id in selected:
                 self.table.selectRow(r)
@@ -382,6 +437,126 @@ class CaptionsPanel(ToolPanel):
             self._edit_track(clear)
         self.guarded(lambda: self.controller.set_caption_style([item.id], style))
 
+
+    # -- animation ---------------------------------------------------------------------
+    def _current_id(self) -> str | None:
+        item = self.page.current()
+        if item is None or not item.captions:
+            return None
+        active = item.captions.active_at(self.page.preview.position_seconds())
+        return active[-1].id if active else None
+
+    def _target_ids(self) -> list[str]:
+        return self.selected_ids() or ([self._current_id()] if self._current_id() else [])
+
+    def _set_animation(self, ids: set[str] | None, animation: dict | None, done: str) -> None:
+        def change(track: CaptionTrack, _item) -> None:
+            for seg in track.segments:
+                if ids is None or seg.id in ids:
+                    seg.animation = dict(animation) if animation is not None else None
+        self._edit_track(change)
+        self.anim_status.setText(done)
+
+    def _editor_animation(self) -> dict | None:
+        animation = self.animation.animation()
+        try:
+            animation.validate()
+        except StudioError as exc:
+            self.anim_status.setText(f"⚠ {exc}")
+            return None
+        return animation.to_dict()
+
+    def animate_current(self) -> None:
+        seg_id, animation = self._current_id(), self._editor_animation()
+        if animation is None:
+            return
+        if seg_id is None:
+            self.anim_status.setText("No caption at the playhead: move the playhead onto a caption.")
+            return
+        self._set_animation({seg_id}, animation, "Animation applied to the caption at the playhead.")
+
+    def animate_selected(self) -> None:
+        ids, animation = set(self.selected_ids()), self._editor_animation()
+        if animation is None:
+            return
+        if not ids:
+            self.anim_status.setText("Select captions in the list on the Text tab first.")
+            return
+        self._set_animation(ids, animation, f"Animation applied to {len(ids)} caption(s).")
+
+    def animate_all(self) -> None:
+        animation, item = self._editor_animation(), self.page.current()
+        if animation is None or item is None or not item.captions:
+            return
+        self._set_animation(None, animation, f"Animation applied to all {len(item.captions.segments)} captions.")
+
+    def clear_animation(self) -> None:
+        ids = set(self._target_ids())
+        if not ids:
+            self.anim_status.setText("Select captions (or move the playhead onto one) to clear their animation.")
+            return
+        self._set_animation(ids, None, f"Animation removed from {len(ids)} caption(s).")
+
+    def copy_animation(self) -> None:
+        ids = self._target_ids()
+        item = self.page.current()
+        if not ids or item is None:
+            self.anim_status.setText("Select the caption to copy from.")
+            return
+        seg = item.captions.find(ids[0])
+        self._clipboard = dict(seg.animation) if seg.animation else CaptionAnimation().to_dict()
+        self.animation.set_animation(CaptionAnimation.from_dict(self._clipboard))
+        self.anim_status.setText("Animation copied: select captions and use Paste.")
+
+    def paste_animation(self) -> None:
+        ids = set(self.selected_ids())
+        if self._clipboard is None:
+            self.anim_status.setText("Copy an animation first.")
+            return
+        if not ids:
+            self.anim_status.setText("Select captions in the list on the Text tab first.")
+            return
+        self._set_animation(ids, self._clipboard, f"Animation pasted to {len(ids)} caption(s).")
+
+    def _show_selected_animation(self) -> None:
+        item = self.page.current()
+        ids = self.selected_ids()
+        if item is None or not item.captions or len(ids) != 1:
+            return
+        seg = item.captions.find(ids[0])
+        if seg.animation:
+            self.animation.set_animation(CaptionAnimation.from_dict(seg.animation))
+
+    def preview_animation(self):
+        """Render a short clip of the selected caption (or the one at the playhead) with the animation
+        in the editor, exactly as the export draws it."""
+        ids, item, animation = self._target_ids(), self.page.current(), self._editor_animation()
+        if animation is None or item is None:
+            return None
+        if not ids:
+            self.anim_status.setText("Select a caption (or move the playhead onto one) to preview.")
+            return None
+        try:
+            job = self.controller.submit_animation_preview(item.id, ids[0], animation)
+        except StudioError as exc:
+            self.anim_status.setText(f"⚠ {exc}")
+            return None
+        self._preview_job = job.id
+        self.anim_status.setText("Rendering the preview clip…")
+        return job
+
+    def on_job_changed(self, job) -> None:
+        if job.id != self._preview_job or not job.state.is_finished:
+            return
+        self._preview_job = None
+        from ai_video_studio.jobs.models import JobState
+        from ai_video_studio.ui.caption_dialogs import ClipPreviewDialog
+
+        if job.state is JobState.COMPLETED and job.result:
+            self.anim_status.setText("Preview ready.")
+            ClipPreviewDialog(job.result["clip"], self).exec()
+        else:
+            self.anim_status.setText(f"⚠ {job.error or 'The preview could not be rendered.'}")
 
 # -- Resize / Crop ------------------------------------------------------------------------------
 

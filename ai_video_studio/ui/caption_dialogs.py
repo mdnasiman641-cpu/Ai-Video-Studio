@@ -310,6 +310,37 @@ class FramePreviewDialog(QDialog):
         self.resize(min(1320, pixmap.width() + 40), min(820, pixmap.height() + 100))
 
 
+class ClipPreviewDialog(QDialog):
+    """Plays a rendered preview clip (caption animation preview). It is a preview in the temp
+    folder, not an export."""
+
+    def __init__(self, clip_path: str, parent=None, title: str = "Caption Animation Preview",
+                 note: str = "Preview clip rendered by FFmpeg/libass with the same captions file as the export, "
+                             "on the original frame at reduced size. It is not saved as an export."):
+        from ai_video_studio.ui.widgets.video_preview import VideoPreview
+
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.preview = VideoPreview()
+        label = QLabel(note)
+        label.setObjectName("Muted")
+        label.setWordWrap(True)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(label)
+        layout.addWidget(self.preview, 1)
+        layout.addWidget(close)
+        self.resize(900, 620)
+        self.preview.load(clip_path, None)
+        self.preview.player.play()
+
+    def done(self, result: int) -> None:  # noqa: D102 - release the file when the dialog closes
+        self.preview.player.stop()
+        self.preview.load(None)
+        super().done(result)
+
+
 class TitleSuggestionsDialog(QDialog):
     """Shows an AI title/description suggestion for the user to copy. Nothing is applied anywhere."""
 

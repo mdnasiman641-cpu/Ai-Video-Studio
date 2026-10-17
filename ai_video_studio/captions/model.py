@@ -57,6 +57,7 @@ class CaptionSegment:
     id: str = field(default_factory=_new_id)
     words: list[Word] = field(default_factory=list)
     style: dict | None = None  # this caption's own style (CaptionStyle dict); None = the video's style
+    animation: dict | None = None  # this caption's own animation (CaptionAnimation dict); None = the default
 
     def __post_init__(self) -> None:
         self.start, self.end = _ms(self.start), _ms(self.end)
@@ -71,6 +72,8 @@ class CaptionSegment:
             data["words"] = [w.to_dict() for w in self.words]
         if self.style:
             data["style"] = dict(self.style)
+        if self.animation is not None:
+            data["animation"] = dict(self.animation)
         return data
 
     @classmethod
@@ -82,6 +85,7 @@ class CaptionSegment:
             id=str(d.get("id") or _new_id()),
             words=[Word.from_dict(w) for w in d.get("words", [])],
             style=dict(d["style"]) if isinstance(d.get("style"), dict) else None,
+            animation=dict(d["animation"]) if isinstance(d.get("animation"), dict) else None,
         )
 
     def style_or(self, default: "CaptionStyle") -> "CaptionStyle":
@@ -273,8 +277,10 @@ class CaptionTrack:
             raise CaptionError("The split point is too close to the start or end of the caption")
 
         index = self.index_of(segment_id)
-        a = CaptionSegment(start=seg.start, end=cut, text=text1, id=seg.id, words=first_words, style=seg.style)
-        b = CaptionSegment(start=cut, end=seg.end, text=text2, words=second_words, style=seg.style)
+        a = CaptionSegment(start=seg.start, end=cut, text=text1, id=seg.id, words=first_words, style=seg.style,
+                           animation=seg.animation)
+        b = CaptionSegment(start=cut, end=seg.end, text=text2, words=second_words, style=seg.style,
+                           animation=seg.animation)
         self.segments[index:index + 1] = [a, b]
         self.sort()
         self._touch()
@@ -295,6 +301,7 @@ class CaptionTrack:
             id=parts[0].id,
             words=[w for p in parts for w in p.words] if all(p.words for p in parts) else [],
             style=parts[0].style,
+            animation=parts[0].animation,
         )
         self.segments[indexes[0]:indexes[-1] + 1] = [merged]
         self._touch()
@@ -405,7 +412,7 @@ def remap_to_cuts(segments: list[CaptionSegment], keep_ranges: list[tuple[float,
                 continue
             text = clean_text("".join(w.text for w in words))
         result.append(CaptionSegment(start=_ms(span[0]), end=_ms(span[1]), text=text, id=seg.id, words=words,
-                                     style=seg.style))
+                                     style=seg.style, animation=seg.animation))
     # Mapping is monotonic, but rounding can make neighbours touch or overlap by a millisecond.
     # Captions that did not overlap before must not overlap after remapping.
     originals = {s.id: s for s in segments}
@@ -427,7 +434,7 @@ def retime(segments: list[CaptionSegment], speed: float) -> list[CaptionSegment]
     for s in segments:
         words = [Word(_ms(w.start / speed), _ms(w.end / speed), w.text) for w in s.words]
         seg = CaptionSegment(start=s.start / speed, end=s.end / speed, text=s.text, id=s.id, words=words,
-                             style=s.style)
+                             style=s.style, animation=s.animation)
         if seg.end - seg.start >= MIN_SEGMENT_DURATION:
             result.append(seg)
     return result

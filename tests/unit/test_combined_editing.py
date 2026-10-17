@@ -109,7 +109,7 @@ def test_graph_runs_every_operation_in_one_pass_in_order():
         keep_ranges=[(0.0, 2.0), (4.0, 6.0)], has_audio=True,
         video_stage=lambda src, dst: f"[{src}]scale=360:640[{dst}]", subtitle_file="subtitles.ass",
         video_filters=e.video_filters(), source_fps=25.0, audio_filters=e.audio_filters(2.0))
-    order = [graph.index(s) for s in ("concat=n=2", "scale=360:640", "setpts=PTS/2", "fps=25", "subtitles=")]
+    order = [graph.index(s) for s in ("concat=n=2", "scale=360:640", "setpts=PTS/2", "fps=25", "ass=subtitles.ass")]
     assert order == sorted(order)
     assert video == "vout" and audio == "aout"
     assert "[acut]aresample=48000,atempo=2,volume=1.5[aout]" in graph

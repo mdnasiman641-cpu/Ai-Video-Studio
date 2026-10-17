@@ -74,3 +74,8 @@ class ToolCard(QFrame):
         layout.addStretch(1)
         self.toggle.toggled.connect(self.body.setEnabled)
         self.body.setEnabled(False)
+
+    def collapse_when_off(self) -> None:
+        """Show the card's fields only while it is switched on (a compact list of switched-off cards)."""
+        self.body.setVisible(self.toggle.isChecked())
+        self.toggle.toggled.connect(self.body.setVisible)

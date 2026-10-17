@@ -1,7 +1,8 @@
 """Batch edit settings: one card per operation with its own on/off switch.
 
 The cards edit a :class:`RenderPreset` (the shared batch settings or one video's own settings):
-Smart Cut, Auto Reframe, Captions, Resize / Crop, Speed and Audio. Auto Reframe and Resize /
+Smart Cut, Auto Reframe, Captions, Caption Animation, Resize / Crop, Speed, Audio, Color Grading
+and Video Filters. A switched-off card is collapsed. Auto Reframe and Resize /
 Crop both decide the framing, so switching one on switches the other off; with both off the
 original frame is kept. Encoding and file-name widgets (``output``, ``template``) belong to the
 preset too, but the Bulk Processing page shows them in its Output Settings panel.
@@ -19,7 +20,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -32,15 +32,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ai_video_studio.captions.animation import CaptionAnimation
 from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.core.errors import StudioError
 from ai_video_studio.reframe.model import TRACKING_MODES
 from ai_video_studio.render.batch import BATCH_RESIZE_MODES, BATCH_TRACKING_MODES, RenderPreset, reframe_aspect
+from ai_video_studio.render.color import ColorSettings
 from ai_video_studio.render.layout import MODES, PRESETS, ResizeSettings
 from ai_video_studio.render.naming import TEMPLATE_FIELDS
 from ai_video_studio.smartcut.model import SmartCutSettings
+from ai_video_studio.ui.widgets.caption_animation import AnimationEditor
 from ai_video_studio.ui.widgets.caption_style_editor import CaptionStyleEditor
 from ai_video_studio.ui.widgets.cards import ToolCard
+from ai_video_studio.ui.widgets.color_grading import ColorGradeForm, FilterPicker
 from ai_video_studio.ui.widgets.common import muted
 from ai_video_studio.ui.widgets.effects_form import EffectsForm
 from ai_video_studio.ui.widgets.output_settings import OutputSettingsForm
@@ -75,8 +79,10 @@ class CaptionStyleDialog(QDialog):
 class PresetEditor(QWidget):
     changed = Signal()
 
-    def __init__(self, preset: RenderPreset | None = None, parent: QWidget | None = None, caption_presets=None):
-        """``caption_presets``: the caption preset store (``names()``, ``get(name)``) for the caption style list."""
+    def __init__(self, preset: RenderPreset | None = None, parent: QWidget | None = None, caption_presets=None,
+                 color_presets=None):
+        """``caption_presets``: the caption preset store (``names()``, ``get(name)``) for the caption style list;
+        ``color_presets``: the user's colour looks (``render.color.ColorPresetStore``)."""
         super().__init__(parent)
         self._filling = False
         self._background = "#000000"
@@ -192,6 +198,28 @@ class PresetEditor(QWidget):
             card.form.addRow(group)
             card.toggle.toggled.connect(box.setChecked)
 
+        # -- Caption animation (needs captions) --
+        self.anim_card = ToolCard("Caption Animation", "Animate every caption (entrance, exit, loop, words)",
+                                  "#ffd43b")
+        self.animation = AnimationEditor()
+        self.anim_card.form.addRow(self.animation)
+        self.anim_note = muted("")
+        self.anim_card.form.addRow(self.anim_note)
+
+        # -- Color grading and video filters --
+        self.color_card = ToolCard("Color Grading", "Cinematic looks and manual colour adjustments", "#1fc8b4")
+        self.grade = ColorGradeForm(color_presets)
+        self.compare_button = QPushButton("Before / After…")
+        self.compare_button.setToolTip("Render one frame of the highlighted (or first ticked) video without and with "
+                                       "the colour settings, exactly as the export grades it.")
+        self.color_card.form.addRow(self.grade)
+        self.color_card.form.addRow(self.compare_button)
+        self.filter_card = ToolCard("Video Filters", "Filter presets with adjustable intensity", "#7f8cff")
+        self.filters = FilterPicker()
+        self.filter_card.form.addRow(self.filters)
+        self.filter_card.form.addRow(muted("A filter is added on top of the colour grade; together they are rendered "
+                                           "as one set of adjustments, so nothing is applied twice."))
+
         # -- encoding and file name (shown by the page in its Output Settings panel) --
         self.output = OutputSettingsForm()
         self.template = QLineEdit()
@@ -203,17 +231,29 @@ class PresetEditor(QWidget):
             box.setMinimumContentsLength(8)
         for label in self.findChildren(QLabel):
             label.setWordWrap(True)
-        grid = QGridLayout(self)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(10)
-        for n, card in enumerate((self.smart_card, self.reframe_card, self.caption_card, self.resize_card,
-                                  self.speed_card, self.audio_card)):
-            grid.addWidget(card, n // 2, n % 2)
+        # two columns of cards that stack independently (a tall card does not leave a gap beside it)
+        columns = QHBoxLayout(self)
+        columns.setContentsMargins(0, 0, 0, 0)
+        columns.setSpacing(10)
+        for cards in ((self.smart_card, self.caption_card, self.resize_card, self.speed_card, self.color_card),
+                      (self.reframe_card, self.anim_card, self.audio_card, self.filter_card)):
+            column = QVBoxLayout()
+            column.setSpacing(10)
+            for card in cards:
+                column.addWidget(card)
+            column.addStretch(1)
+            columns.addLayout(column, 1)
+        for card in self.cards():
+            card.collapse_when_off()
 
         self.reframe_card.toggle.toggled.connect(lambda on: self._exclusive(on, self.resize_card))
         self.resize_card.toggle.toggled.connect(lambda on: self._exclusive(on, self.reframe_card))
-        for card in (self.smart_card, self.reframe_card, self.caption_card, self.resize_card):
+        for card in (self.smart_card, self.reframe_card, self.caption_card, self.resize_card, self.anim_card,
+                     self.color_card, self.filter_card):
             card.toggle.toggled.connect(self._emit)
+        self.animation.changed.connect(self._emit)
+        self.grade.changed.connect(self._emit)
+        self.filters.changed.connect(self._emit)
         for box in (self.tracking, self.reframe_size, self.caption_style, self.size, self.mode):
             box.currentIndexChanged.connect(self._emit)
         for box in (self.threshold, self.min_silence, self.min_keep, self.width_spin, self.height_spin, self.zoom,
@@ -232,6 +272,10 @@ class PresetEditor(QWidget):
         self.set_preset(preset or RenderPreset())
 
     # ------------------------------------------------------------------ helpers
+    def cards(self) -> list[ToolCard]:
+        return [self.smart_card, self.reframe_card, self.caption_card, self.anim_card, self.resize_card,
+                self.speed_card, self.audio_card, self.color_card, self.filter_card]
+
     def _exclusive(self, on: bool, other: ToolCard) -> None:
         if on and other.toggle.isChecked():
             other.toggle.setChecked(False)
@@ -294,6 +338,13 @@ class PresetEditor(QWidget):
             self.effects.set_effects(p.effects)
             self.speed_card.toggle.setChecked(p.effects.speed_enabled)
             self.audio_card.toggle.setChecked(p.effects.audio_enabled)
+            self.anim_card.toggle.setChecked(bool(p.caption_animation))
+            self.animation.set_animation(CaptionAnimation.from_dict(p.caption_animation)
+                                         if p.caption_animation else None)
+            self.color_card.toggle.setChecked(p.color.grading)
+            self.grade.set_settings(p.color)
+            self.filter_card.toggle.setChecked(p.color.filtering)
+            self.filters.set_filter(p.color.filter, p.color.intensity)
             self._preset_style = p.caption_style
             self._current_style_key = PRESET_STYLE if p.caption_style else OWN_STYLE
             self.caption_style.clear()
@@ -355,18 +406,28 @@ class PresetEditor(QWidget):
         effects = self.effects.effects()
         effects.speed_enabled = self.speed_card.toggle.isChecked()
         effects.audio_enabled = self.audio_card.toggle.isChecked()
+        color = ColorSettings(grading=self.color_card.toggle.isChecked(), filter=self.filters.selected(),
+                              intensity=self.filters.intensity.value(), filtering=self.filter_card.toggle.isChecked())
+        self.grade.apply_to(color)
+        animation = None
+        if self.anim_card.toggle.isChecked():
+            anim = self.animation.animation()
+            anim.validate()
+            animation = anim.to_dict() if anim.active else None
         preset = RenderPreset(operation=operation, resize=resize, tracking_mode=self.tracking.currentData(),
                               output=self.output.settings(), filename_template=self.template.text().strip(),
                               smart_cut=self.smart_cut.isChecked(), smart_cut_settings=cut_settings,
                               caption_style=self.selected_caption_style(),
-                              auto_captions=self.auto_captions.isChecked(), effects=effects)
+                              auto_captions=self.auto_captions.isChecked(), effects=effects, color=color,
+                              caption_animation=animation)
         preset.validate()
         return preset
 
     def enabled_operations(self) -> list[str]:
         """Names of the switched-on operations (for the page's summary)."""
         cards = ((self.smart_card, "Smart Cut"), (self.reframe_card, "Auto Reframe"), (self.caption_card, "Captions"),
-                 (self.resize_card, "Resize / Crop"), (self.speed_card, "Speed"), (self.audio_card, "Audio"))
+                 (self.anim_card, "Caption Animation"), (self.resize_card, "Resize / Crop"), (self.speed_card, "Speed"),
+                 (self.audio_card, "Audio"), (self.color_card, "Color Grading"), (self.filter_card, "Video Filters"))
         return [name for card, name in cards if card.toggle.isChecked()]
 
     def _update_enabled(self) -> None:
@@ -382,16 +443,19 @@ class PresetEditor(QWidget):
         self.color_button.setStyleSheet(f"background: {self._background};")
         self.auto_captions.setEnabled(self.burn.isChecked())
         self.caption_style.setEnabled(self.burn.isChecked())
+        self.anim_note.setText("" if self.burn.isChecked() else
+                               "⚠ Captions are switched off, so there is nothing to animate.")
         self._update_style_info()
 
 
 class PresetDialog(QDialog):
     """Edit one video's own settings (override)."""
 
-    def __init__(self, parent: QWidget | None, title: str, preset: RenderPreset, caption_presets=None):
+    def __init__(self, parent: QWidget | None, title: str, preset: RenderPreset, caption_presets=None,
+                 color_presets=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.editor = PresetEditor(preset, caption_presets=caption_presets)
+        self.editor = PresetEditor(preset, caption_presets=caption_presets, color_presets=color_presets)
         inner = QWidget()
         box = QVBoxLayout(inner)
         box.addWidget(self.editor)
