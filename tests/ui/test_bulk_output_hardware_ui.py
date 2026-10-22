@@ -37,6 +37,7 @@ def window(qtbot, tmp_path, monkeypatch):
         monkeypatch.setattr(QMessageBox, name, lambda *a, **k: QMessageBox.StandardButton.Ok)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     monkeypatch.setattr(hardware, "detect", lambda ffmpeg, refresh=False: fake_hardware(True))
+    monkeypatch.setattr(hardware, "cached", lambda ffmpeg: None)  # never the real machine's earlier result
     monkeypatch.setattr(fc, "nvenc_usable", lambda ffmpeg, encoder="h264_nvenc": encoder.endswith("_nvenc"))
     services = Services(tmp_path / "ui.db")
     win = MainWindow(services)
