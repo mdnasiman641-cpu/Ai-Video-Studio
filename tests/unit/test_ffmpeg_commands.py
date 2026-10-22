@@ -58,11 +58,11 @@ def test_progress_parser():
 
 
 def test_choose_encoder(monkeypatch):
-    monkeypatch.setattr(fc, "nvenc_usable", lambda ffmpeg: False)
+    monkeypatch.setattr(fc, "nvenc_usable", lambda ffmpeg, encoder="h264_nvenc": False)
     assert fc.choose_video_encoder("libx264", "ffmpeg")[0] == "libx264"
     codec, reason = fc.choose_video_encoder("h264_nvenc", "ffmpeg")
     assert codec == "libx264" and "not usable" in reason
-    monkeypatch.setattr(fc, "nvenc_usable", lambda ffmpeg: True)
+    monkeypatch.setattr(fc, "nvenc_usable", lambda ffmpeg, encoder="h264_nvenc": True)
     assert fc.choose_video_encoder("auto", "ffmpeg")[0] == "h264_nvenc"
     assert fc.choose_video_encoder("libx264", "ffmpeg")[0] == "libx264"
 

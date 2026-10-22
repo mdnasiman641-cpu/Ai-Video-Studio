@@ -1,4 +1,4 @@
-"""Shared encoding step for export jobs: encoder choice, NVENC → CPU fallback, atomic output."""
+"""Shared encoding step for export jobs: encoder choice, hardware → CPU fallback, atomic output."""
 
 from __future__ import annotations
 
@@ -10,11 +10,14 @@ from typing import Callable
 from ai_video_studio.core.errors import StudioError
 from ai_video_studio.core.ffmpeg_commands import (
     CPU_ENCODERS,
-    GPU_ENCODERS,
+    HW_ENCODERS,
     EncoderSettings,
     ProgressParser,
     choose_video_encoder,
     cpu_encoder_available,
+    encoder_family,
+    encoder_label,
+    normalise_preference,
 )
 from ai_video_studio.core.fs import remove_file
 from ai_video_studio.core.process import run_streaming
@@ -44,41 +47,57 @@ def encode_with_fallback(
     family: str = "h264",
     bitrate_kbps: int | None = None,
     progress_range: tuple[float, float] = (0.0, 1.0),
+    speed: str = "standard",
+    cpu_preset: str = "medium",
+    allow_fallback: bool = True,
 ) -> tuple[str, list[str]]:
-    """Encode to ``output`` and return ``(codec, warnings)``.
+    """Encode to ``output`` and return ``(codec, warnings)``; ``codec`` is the encoder really used.
 
-    ``build_args(encoder, partial_output)`` returns the FFmpeg command. NVENC is used only
-    when a test encode proved it works (see ``choose_video_encoder``); if the real encode
-    still fails with NVENC it is retried once with libx264. FFmpeg writes to a ``.part``
-    file that replaces ``output`` only after success, and is removed on failure or cancel.
+    ``build_args(encoder, partial_output)`` returns the FFmpeg command. A hardware encoder is
+    used only when a test encode proved it works (see ``choose_video_encoder``). If the real
+    encode still fails on it, it is retried on the CPU only for Auto or when the user allowed
+    the fallback; the warning says so with FFmpeg's message. FFmpeg writes to a ``.part`` file
+    that replaces ``output`` only after success, and is removed on failure or cancel.
     """
-    codec, reason = choose_video_encoder(preference, ffmpeg, family)
-    warnings = [] if codec == GPU_ENCODERS[family] or preference in ("libx264", "cpu") else [reason]
+    preference = normalise_preference(preference)
+    codec, reason = choose_video_encoder(preference, ffmpeg, family, allow_fallback)
+    chosen = preference if preference in HW_ENCODERS else None
+    warnings = [] if (encoder_family(codec) != "cpu" and preference == "auto") or reason in (
+        "CPU encoder selected",) or (chosen and encoder_family(codec) == chosen) else [reason]
     low, high = progress_range
     partial = partial_path(output)
 
     def run(selected: str):
         parser = ProgressParser(duration)
+        ctx.set_detail(encoder=encoder_label(selected), speed=None)
 
         def on_line(line: str) -> None:
             fraction = parser.feed(line)
+            if line.startswith("speed=") and parser.speed:
+                ctx.set_detail(speed=parser.speed, fps=parser.fps)
             if fraction is not None:
                 ctx.report_progress(low + (high - low) * min(fraction, 0.999))
 
-        args = build_args(EncoderSettings(codec=selected, quality=quality, bitrate_kbps=bitrate_kbps), str(partial))
+        args = build_args(EncoderSettings(codec=selected, quality=quality, bitrate_kbps=bitrate_kbps, speed=speed,
+                                          cpu_preset=cpu_preset), str(partial))
+        log.info("Encoding", extra={"job_id": ctx.job.id, "encoder": selected, "speed": speed})
         return run_streaming(args, on_line, cancel_event=ctx.cancel_event, cwd=str(workdir))
 
     try:
         result = run(codec)
         cpu = CPU_ENCODERS[family]
-        if result.returncode != 0 and codec == GPU_ENCODERS[family] and cpu_encoder_available(ffmpeg, family):
-            warnings.append(f"NVENC encoding failed; retried with the CPU encoder ({cpu}): "
+        may_fall_back = preference == "auto" or allow_fallback
+        if result.returncode != 0 and encoder_family(codec) != "cpu" and may_fall_back and \
+                cpu_encoder_available(ffmpeg, family):
+            warnings.append(f"{encoder_label(codec)} encoding failed; retried with the CPU encoder ({cpu}): "
                             + ffmpeg_error(result.stderr, "unknown error"))
-            log.warning("NVENC encode failed, retrying on the CPU", extra={"job_id": ctx.job.id, "encoder": cpu})
+            log.warning("Hardware encode failed, retrying on the CPU", extra={"job_id": ctx.job.id, "encoder": codec,
+                                                                             "error": ffmpeg_error(result.stderr, "")})
             codec = cpu
             result = run(codec)
         if result.returncode != 0:
-            raise StudioError(f"Export failed: {ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
+            raise StudioError(f"Export failed ({encoder_label(codec)}): "
+                              f"{ffmpeg_error(result.stderr, 'unknown FFmpeg error')}")
         os.replace(partial, output)
     finally:
         # A cancelled FFmpeg can keep the file locked on Windows for a few seconds after it was

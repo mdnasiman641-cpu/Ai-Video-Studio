@@ -151,7 +151,27 @@ def _default_model_factory(model: str, device: str, compute_type: str, download_
         raise DependencyMissingError(
             "faster-whisper is not installed. Run: pip install -r requirements.txt"
         ) from exc
-    return WhisperModel(model, device=device, compute_type=compute_type, download_root=download_root)
+    return WhisperModel(model, device=device, compute_type=compute_type, download_root=download_root,
+                        cpu_threads=cpu_threads() if device == "cpu" else 0)
+
+
+# faster-whisper uses 4 CPU threads unless told otherwise; one thread per physical core is
+# faster on CPUs with more cores (hyper-threads add little to this workload).
+_cpu_threads = 0
+
+
+def set_cpu_threads(threads: int) -> None:
+    """``0`` = one per physical core (detected)."""
+    global _cpu_threads
+    _cpu_threads = max(0, int(threads))
+
+
+def cpu_threads() -> int:
+    if _cpu_threads:
+        return _cpu_threads
+    from ai_video_studio.core.hardware import cpu_info
+
+    return max(1, min(32, cpu_info()[2]))
 
 
 # CTranslate2 4.x on Windows needs these from CUDA 12 / cuDNN 9. A GPU and driver alone are not
@@ -236,7 +256,7 @@ _cached: dict = {}
 
 
 def _get_model(factory: ModelFactory, name: str, device: str, compute_type: str, download_root: str | None):
-    key = (factory, name, device, compute_type, download_root)
+    key = (factory, name, device, compute_type, download_root, _cpu_threads)
     if _cached.get("key") != key:
         _cached.clear()
         _cached["model"] = factory(name, device, compute_type, download_root)

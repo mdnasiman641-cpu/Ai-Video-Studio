@@ -17,17 +17,19 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
 from ai_video_studio.core import paths
 from ai_video_studio.core.errors import MediaError, StudioError
+from ai_video_studio.core.ffmpeg_commands import encoder_label
 from ai_video_studio.core.ffmpeg_tools import find_tool, probe_video
 from ai_video_studio.core.fs import remove_file, remove_tree
 from ai_video_studio.core.process import run_process, run_streaming
 from ai_video_studio.captions.models import ModelMissingError
-from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir, transcribe_video
+from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir, transcribe_video, transcript_cache_config
 from ai_video_studio.jobs.encode import encode_with_fallback, ffmpeg_error, partial_path
 from ai_video_studio.jobs.manager import JobContext
 from ai_video_studio.jobs.models import Job
@@ -37,7 +39,9 @@ from ai_video_studio.captions.style import CaptionStyle
 from ai_video_studio.jobs.reframe_jobs import run_tracking_analysis
 from ai_video_studio.reframe.framing import caption_band_from_style, compute_crop_path, resolve_output_size
 from ai_video_studio.reframe.model import ReframeSettings
+from ai_video_studio.reframe.model import TrackingAnalysis
 from ai_video_studio.render.color import ColorSettings
+from ai_video_studio.storage import analysis_cache
 from ai_video_studio.render.effects import EditEffects
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.render.pipeline import (
@@ -58,6 +62,8 @@ SMARTCUT_ANALYZE_JOB = "smartcut_analyze"
 RENDER_JOB = "render_video"
 RENDER_FRAME_JOB = "render_frame_preview"
 RENDER_CLIP_JOB = "render_clip_preview"
+LEVELS_CACHE_CONFIG = {"levels": 1}   # the levels analysis has no settings
+TRACKING_CACHE_VERSION = 1
 
 _writing: set[str] = set()
 _writing_lock = threading.Lock()
@@ -103,6 +109,7 @@ def make_smartcut_analyze_handler(get_ffmpeg: Callable[[], Path]):
         if p.get("has_audio") is False:
             raise MediaError(NO_AUDIO)
         levels = analyse_levels(source, float(p.get("duration") or 0), get_ffmpeg(), ctx)
+        analysis_cache.put("levels", source, LEVELS_CACHE_CONFIG, levels.to_dict())  # Bulk can reuse it
         return {"media_id": p.get("media_id"), "levels": levels.to_dict()}
 
     return handle
@@ -116,8 +123,16 @@ def auto_cut_ranges(p: dict, ctx: JobContext, ffmpeg: Path, progress_range: tupl
     if not p.get("has_audio", True):
         return None, ["Smart Cut was skipped: the video has no audio track."]
     ctx.set_stage("analyzing")
+    ctx.set_detail(step="Smart Cut: measuring audio levels")
     duration = float(p.get("duration") or 0)
-    levels = analyse_levels(Path(p["path"]), duration, ffmpeg, ctx, progress_range)
+    cached = analysis_cache.get("levels", p["path"], LEVELS_CACHE_CONFIG)
+    notes_from_cache = []
+    if cached is not None:
+        levels = AudioLevels.from_dict(cached)
+        notes_from_cache.append("Smart Cut reused the audio levels measured earlier for this file.")
+    else:
+        levels = analyse_levels(Path(p["path"]), duration, ffmpeg, ctx, progress_range)
+        analysis_cache.put("levels", p["path"], LEVELS_CACHE_CONFIG, levels.to_dict())
     duration = duration or levels.duration
     segments = build_segments(detect_silences(levels, settings, duration), duration, settings.min_keep)
     ranges = keep_ranges(segments)
@@ -125,8 +140,8 @@ def auto_cut_ranges(p: dict, ctx: JobContext, ffmpeg: Path, progress_range: tupl
     if not ranges:
         raise StudioError("Smart Cut found no sound to keep (the whole video is below the silence threshold).")
     if removed < 0.05:
-        return None, [f"Smart Cut found no silence below {settings.threshold_db:g} dB."]
-    return ranges, [f"Smart Cut removed {removed:.1f} s of silence."]
+        return None, notes_from_cache + [f"Smart Cut found no silence below {settings.threshold_db:g} dB."]
+    return ranges, notes_from_cache + [f"Smart Cut removed {removed:.1f} s of silence."]
 
 
 _filters_cache: dict[str, set[str]] = {}
@@ -185,9 +200,21 @@ def reframe_stage_for(p: dict, ctx: JobContext, ffmpeg: Path, detector_factory=N
     settings.validate()
     ctx.set_stage("analyzing")
     analysis = None
+    cache_notes: list[str] = []
     if settings.tracks_subjects:
-        analysis = run_tracking_analysis(auto["analysis"] | {"path": p["path"]}, ffmpeg, ctx, detector_factory, vad,
-                                         progress_range=progress_range)
+        config = {k: v for k, v in auto["analysis"].items() if k != "models_dir"} | {"kind": TRACKING_CACHE_VERSION}
+        cached = analysis_cache.get("tracking", p["path"], config)
+        if cached is not None:
+            analysis = TrackingAnalysis.from_dict(cached)
+            cache_notes.append("Auto Reframe reused the face/speaker analysis made earlier for this file with the "
+                               "same settings.")
+        else:
+            ctx.set_detail(step="Auto Reframe: detecting faces" + (" and speech" if "speech" in
+                                                                     auto["analysis"].get("features", []) else ""))
+            analysis = run_tracking_analysis(auto["analysis"] | {"path": p["path"]}, ffmpeg, ctx, detector_factory,
+                                             vad, progress_range=progress_range)
+            if not any("Haar" in w or "YuNet" in w for w in analysis.warnings):  # not with a fallback detector
+                analysis_cache.put("tracking", p["path"], config, analysis.to_dict())
     band = caption_band_from_style(CaptionStyle.from_dict(auto["caption_style"])) if auto.get("caption_style") else None
     width, height = int(auto["analysis"]["width"]), int(auto["analysis"]["height"])
     path = compute_crop_path(analysis, settings, width, height, float(p.get("duration") or 0), caption_band=band)
@@ -195,7 +222,7 @@ def reframe_stage_for(p: dict, ctx: JobContext, ffmpeg: Path, detector_factory=N
     stage = {"type": "reframe", "src_w": path.src_w, "src_h": path.src_h, "crop_w": path.crop_w,
              "crop_h": path.crop_h, "keyframes": path.keyframes(), "out_w": out_w, "out_h": out_h,
              "fps": p.get("fps"), "duration": p.get("duration")}
-    notes = list(path.warnings) + (analysis.warnings if analysis else [])
+    notes = cache_notes + list(path.warnings) + (analysis.warnings if analysis else [])
     if analysis is not None and not analysis.tracks:
         notes.append("No face or person was found; the fallback framing was used.")
     return stage, notes
@@ -207,6 +234,12 @@ def auto_captions(p: dict, job: Job, ctx: JobContext, ffmpeg: Path, model_factor
     if not p.get("has_audio", True):
         raise MediaError("Captions cannot be generated: this video has no audio track.")
     ctx.set_stage("analyzing")
+    config = transcript_cache_config(p["captions_auto"])
+    cached = analysis_cache.get("transcript", p["path"], config)
+    if cached is not None and cached.get("segments"):
+        return cached["segments"], [f"{len(cached['segments'])} caption(s) reused from an earlier transcription of "
+                                    f"this file ({cached.get('language')}, same model and language)."]
+    ctx.set_detail(step="Captions: transcribing speech (Whisper)")
     folder = paths.temp_dir() / f"job-{job.id}-captions"
     folder.mkdir(parents=True, exist_ok=True)
     try:
@@ -227,12 +260,24 @@ def auto_captions(p: dict, job: Job, ctx: JobContext, ffmpeg: Path, model_factor
     if not segments:
         raise MediaError("Automatic captions failed: no speech was recognised, so there are no captions to burn "
                          "in. Turn off automatic captions for this video or check its audio.")
+    analysis_cache.put("transcript", p["path"], config, {"segments": segments, "language": result.language,
+                                                          "device": result.device})
     return segments, [f"{len(segments)} caption(s) generated ({result.language}, {result.device})."] + list(
         result.warnings)
 
 
-def verify_output(output: Path, ffprobe: Path | None, expected_duration: float | None) -> None:
-    """Check that an export is a readable video before the job counts as completed."""
+def verify_output(output: Path, ffprobe: Path | None, expected_duration: float | None, expect: dict | None = None,
+                  has_audio: bool | None = None) -> None:
+    """Check that an export is a complete, readable video before the job counts as completed.
+
+    The file must exist, be non-empty and readable by FFprobe, with a video stream of the expected
+    size (``expect = {"width", "height"}``), a duration close to the expected one, the expected
+    frame rate (``expect["fps"]``) and audio when the export should have it. A failing file is
+    removed and the job fails with the reason.
+    """
+    if not output.is_file() or output.stat().st_size == 0:
+        remove_file(output)
+        raise MediaError("The export produced no file (or an empty one).")
     if ffprobe is None:
         log.warning("FFprobe not found; the exported file was not verified", extra={"output": str(output)})
         return
@@ -241,10 +286,23 @@ def verify_output(output: Path, ffprobe: Path | None, expected_duration: float |
     except StudioError as exc:
         remove_file(output)
         raise MediaError(f"The exported file could not be read back ({exc}); it was removed.") from exc
-    if not meta.width or not meta.height or (expected_duration and meta.duration < min(0.5, expected_duration) * 0.5):
+    problems = []
+    if not meta.width or not meta.height:
+        problems.append("it has no usable video stream")
+    elif expect and expect.get("width") and (meta.width, meta.height) != (int(expect["width"]), int(expect["height"])):
+        problems.append(f"it is {meta.width}×{meta.height} instead of {expect['width']}×{expect['height']}")
+    if expected_duration and meta.duration < min(0.5, expected_duration) * 0.5:
+        problems.append("it is much shorter than expected")
+    elif expected_duration and expected_duration > 2 and meta.duration < expected_duration * 0.9:
+        problems.append(f"it is {meta.duration:.1f} s long instead of about {expected_duration:.1f} s")
+    if expect and expect.get("fps") and meta.fps and abs(meta.fps - float(expect["fps"])) > 0.5:
+        problems.append(f"it has {meta.fps:.3g} fps instead of {float(expect['fps']):g}")
+    if has_audio and not meta.has_audio:
+        problems.append("its audio track is missing")
+    if problems:
         remove_file(output)
-        raise MediaError("The exported file has no usable video stream; it was removed. Check the FFmpeg log in the "
-                         "logs folder.")
+        raise MediaError("The exported file failed the final check (" + "; ".join(problems) + "); it was removed. "
+                         "Check the FFmpeg log in the logs folder.")
 
 
 def _sibling_ffprobe(ffmpeg: Path) -> Path | None:
@@ -275,16 +333,27 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
         notes: list[str] = []
         start = 0.0
         caption_segments = (p.get("captions") or {}).get("segments")
+        timings: dict[str, float] = {}
+        clock = time.monotonic()
+
+        def lap(name: str) -> None:
+            nonlocal clock
+            now = time.monotonic()
+            timings[name] = round(now - clock, 2)
+            clock = now
+
         if p.get("captions_auto"):  # generated here, on the source timeline; timed below with the cuts
             start = 0.4
             caption_segments, caption_notes = auto_captions(p, job, ctx, get_ffmpeg(), model_factory, cuda_devices,
                                                             (0.0, start))
             notes += caption_notes
+            lap("captions")
         if p.get("smartcut_auto") and not ranges:
             cut_end = start + (0.2 if p.get("reframe_auto") else 0.3) * (1 - start)
             ranges, cut_notes = auto_cut_ranges(p, ctx, get_ffmpeg(), (start, cut_end))
             start = cut_end
             notes += cut_notes
+            lap("smart_cut")
         if ranges:
             ranges = snap_ranges([tuple(r) for r in ranges], fps, duration or None)
             if not ranges:
@@ -305,6 +374,7 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
                                                              (start, start + (1 - start) / 2))
             notes += reframe_notes
             start = start + (1 - start) / 2
+            lap("auto_reframe")
         progress_range = (start, 1.0)
         ass = p.get("ass")
         if p.get("captions"):  # captions timed here, after the cuts are known (cuts, then speed: once)
@@ -320,6 +390,8 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
             else:
                 notes.append("No captions are left after the cuts; exported without captions.")
         ctx.set_stage("rendering")
+        ctx.set_detail(step="Rendering and encoding")
+        clock = time.monotonic()
         key = output_key(output)
         with _writing_lock:
             if key in _writing:
@@ -341,22 +413,29 @@ def make_render_handler(get_ffmpeg: Callable[[], Path], detector_factory=None, v
             ctx.check_cancelled()
 
             def build(encoder, partial: str) -> list[str]:
-                encoder = replace(encoder, audio_bitrate=f"{settings.audio_bitrate}k")
+                encoder = replace(encoder, audio_bitrate=f"{settings.audio_kbps}k")
                 # Runs inside the job folder: filter arguments only contain plain file names.
-                return render_args(get_ffmpeg(), str(source), graph, audio_label, mode, encoder, partial, folder)
+                return render_args(get_ffmpeg(), str(source), graph, audio_label, mode, encoder, partial, folder,
+                                   hw_decode=settings.hw_decode == "auto")
 
             codec, warnings = encode_with_fallback(
                 get_ffmpeg(), build, settings.encoder, settings.crf_value, out_duration, output, folder, ctx,
-                family=settings.codec, bitrate_kbps=settings.target_bitrate, progress_range=progress_range)
+                family=settings.codec, bitrate_kbps=settings.target_bitrate, progress_range=progress_range,
+                speed=settings.speed, cpu_preset=settings.cpu_preset, allow_fallback=settings.allow_fallback)
         finally:
             remove_tree(folder)
             with _writing_lock:
                 _writing.discard(key)
-        verify_output(output, get_ffprobe() if get_ffprobe else _sibling_ffprobe(get_ffmpeg()), out_duration)
+        lap("render")
+        ctx.set_detail(step="Checking the exported file")
+        verify_output(output, get_ffprobe() if get_ffprobe else _sibling_ffprobe(get_ffmpeg()), out_duration,
+                      expect=p.get("expect"), has_audio=has_audio and mode != "none")
+        lap("verify")
         log.info("Render finished", extra={"job_id": job.id, "encoder": codec, "cuts": len(ranges or []),
-                                           "speed": effects.video_factor,
+                                           "speed": effects.video_factor, "timings": timings,
                                            "color": ", ".join(color.summary()) if color else "none"})
         return {"media_id": p.get("media_id"), "output": str(output), "encoder": codec,
+                "encoder_label": encoder_label(codec), "timings": timings, "mode": settings.describe(),
                 "warnings": warnings + notes, "duration": out_duration, "segments": len(ranges or []) or 1,
                 "batch_id": p.get("batch_id"), "batch_item": p.get("batch_item")}
 

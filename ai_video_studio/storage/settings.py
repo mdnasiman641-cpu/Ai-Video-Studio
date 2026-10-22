@@ -116,6 +116,9 @@ SETTINGS: dict[str, SettingSpec] = {
     "reframe_fallback": SettingSpec(str, "center", "Fallback", _choice("hold", "center", "group")),
     "reframe_analysis_fps": SettingSpec(float, 5.0, "Analysis frame rate", _float_range(0.5, 30.0)),
     "reframe_av_fps": SettingSpec(float, 15.0, "Mouth analysis frame rate", _float_range(5.0, 30.0)),
+    "reframe_analysis_size": SettingSpec(float, 960.0, "Analysis frame size", _float_range(480.0, 1920.0)),
+    # Speech recognition on the CPU: threads (0 = one per physical core, detected)
+    "transcription_threads": SettingSpec(int, 0, "Transcription CPU threads", _int_range(0, 64)),
 }
 
 # Settings key -> ReframeSettings field
@@ -125,6 +128,7 @@ REFRAME_DEFAULT_KEYS = {
     "reframe_speaker_hold_seconds": "speaker_hold_seconds", "reframe_hold_seconds": "hold_seconds",
     "reframe_smoothing": "smoothing", "reframe_padding": "padding", "reframe_max_upscale": "max_upscale",
     "reframe_fallback": "fallback", "reframe_analysis_fps": "analysis_fps", "reframe_av_fps": "av_fps",
+    "reframe_analysis_size": "analysis_size",
 }
 
 

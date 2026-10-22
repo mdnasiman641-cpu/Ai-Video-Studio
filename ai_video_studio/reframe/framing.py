@@ -32,6 +32,7 @@ ASPECT_PRESETS: dict[str, tuple[int, int] | None] = {
     "1:1": (1, 1),
     "4:5": (4, 5),
 }
+CUSTOM_ASPECT = "custom"  # any output size (its own ratio); not listed with the presets above
 PRESET_LABELS = {
     "original": "Original aspect ratio",
     "16:9": "16:9 landscape (YouTube)",
@@ -53,13 +54,20 @@ def even(value: float) -> int:
     return max(2, int(value) // 2 * 2)
 
 
-def crop_size(src_w: int, src_h: int, preset: str, zoom: float = 1.0) -> tuple[int, int]:
-    """Largest crop with the preset's aspect ratio that fits the frame, divided by ``zoom``."""
-    if preset not in ASPECT_PRESETS:
+def crop_size(src_w: int, src_h: int, preset: str, zoom: float = 1.0,
+              ratio: tuple[int, int] | None = None) -> tuple[int, int]:
+    """Largest crop with the preset's aspect ratio that fits the frame, divided by ``zoom``.
+
+    ``preset`` "custom" uses ``ratio`` (the output width and height), so any output size is
+    framed without stretching the picture."""
+    if preset == CUSTOM_ASPECT:
+        if not ratio or ratio[0] <= 0 or ratio[1] <= 0:
+            raise ReframeError("A custom aspect ratio needs an output width and height.")
+    elif preset not in ASPECT_PRESETS:
         raise ReframeError(f"Unknown aspect preset '{preset}'")
     if src_w <= 0 or src_h <= 0:
         raise ReframeError("The video has no valid frame size.")
-    ratio = ASPECT_PRESETS[preset]
+    ratio = ratio if preset == CUSTOM_ASPECT else ASPECT_PRESETS[preset]
     aspect = src_w / src_h if ratio is None else ratio[0] / ratio[1]
     zoom = max(1.0, zoom)
     if src_w / src_h > aspect:  # height limits the crop
@@ -77,6 +85,8 @@ def _nearest_even(value: float) -> int:
 
 def output_size_options(preset: str, src_w: int, src_h: int) -> list[tuple[int, int]]:
     """Output sizes offered for a preset; the first is the default."""
+    if preset == CUSTOM_ASPECT:
+        raise ReframeError("A custom aspect ratio needs an output width and height.")
     if preset != "original":
         return list(OUTPUT_SIZES[preset])
     options = [(even(src_w), even(src_h))]
@@ -447,7 +457,8 @@ def _ema(values: list[float], times: list[float], tau: float) -> list[float]:
 def effective_crop(settings: ReframeSettings, src_w: int, src_h: int) -> tuple[int, int, float, list[str], list[str]]:
     """Crop size after applying the maximum upscale. Returns (w, h, zoom used, warnings, notes)."""
     out_w, _out_h = resolve_output_size(settings, src_w, src_h)
-    full_w, _full_h = crop_size(src_w, src_h, settings.preset, 1.0)
+    ratio = (settings.output_width, settings.output_height) if settings.preset == CUSTOM_ASPECT else None
+    full_w, _full_h = crop_size(src_w, src_h, settings.preset, 1.0, ratio)
     warnings, notes = [], []
     full_upscale = out_w / full_w
     max_zoom = max(1.0, settings.max_upscale * full_w / out_w)
@@ -463,7 +474,7 @@ def effective_crop(settings: ReframeSettings, src_w: int, src_h: int) -> tuple[i
         warnings.append(f"The source is too small for this output: the {full_w}×{_full_h} crop is enlarged "
                         f"{full_upscale:.2f}×, above the {settings.max_upscale:.2f}× limit, so the result will be "
                         f"soft.{hint}, or raise the limit.")
-    cw, ch = crop_size(src_w, src_h, settings.preset, zoom)
+    cw, ch = crop_size(src_w, src_h, settings.preset, zoom, ratio)
     return cw, ch, zoom, warnings, notes
 
 

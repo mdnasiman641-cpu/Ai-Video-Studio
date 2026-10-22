@@ -65,12 +65,17 @@ class TrackingOptions(QWidget):
                                    "tracking"), 1),
             "av_fps": (_spin(5, 30, 1, 0, " frames/s", "Frames analysed per second when mouth movement is "
                              "needed (Active Speaker). Lower is faster but matches speech less reliably."), 1),
+            "analysis_size": (_spin(480, 1920, 160, 0, " px", "Longer side of the analysed frames (the export "
+                                    "keeps full resolution). 640 px analyses about 1.5× faster than 960 px but "
+                                    "finds small or distant faces less reliably; 1280 px is slower and finds them "
+                                    "better."), 1),
         }
         labels = {
             "confidence_threshold": "Tracking confidence:", "speech_threshold": "Speech threshold:",
             "switch_seconds": "Speaker switch after:", "speaker_hold_seconds": "Keep last speaker:",
             "hold_seconds": "Hold when lost:", "smoothing": "Camera smoothing:", "padding": "Crop padding:",
             "max_upscale": "Maximum upscale:", "analysis_fps": "Analysis rate:", "av_fps": "Mouth analysis rate:",
+            "analysis_size": "Analysis frame size:",
         }
         self.form = QFormLayout(self)
         self.form.setContentsMargins(0, 0, 0, 0)
@@ -111,6 +116,7 @@ class TrackingOptions(QWidget):
             "max_upscale": True,
             "analysis_fps": tracking,
             "av_fps": "mouth" in info.requires,
+            "analysis_size": tracking,
             "fallback": tracking,
         }
         for name, show in visible.items():

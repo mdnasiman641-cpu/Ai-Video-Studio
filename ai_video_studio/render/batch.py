@@ -80,9 +80,9 @@ class RenderPreset:
             if self.tracking_mode not in BATCH_TRACKING_MODES:
                 raise BatchError("Manual Subject Tracking needs you to pick a person in each video; use another "
                                  "tracking mode for batches.")
-            out_w, out_h = self.resize.output_size(1920, 1080)
-            if self.resize.preset == "original" or not reframe_aspect(out_w, out_h):
-                raise BatchError("Auto Reframe needs a 16:9, 9:16, 1:1 or 4:5 output size.")
+            if self.resize.preset == "original":
+                raise BatchError("Auto Reframe needs an output aspect ratio (16:9, 9:16, 1:1, 4:5 or a custom "
+                                 "size); with the original aspect ratio there is nothing to reframe.")
         self.output.validate()
         validate_template(self.filename_template)
 
@@ -146,6 +146,22 @@ def preset_from_edit(resize: ResizeSettings | None, *, use_cuts: bool, smart_cut
                           caption_style else None, effects=effects.copy())
     preset.validate()
     return preset
+
+
+FACE_ONLY_MODES = ("auto_face", "active_speaker")  # framing follows face tracks only (reframe.framing)
+
+
+def batch_analysis_features(settings: ReframeSettings) -> list[str]:
+    """What a batch export analyses for its tracking mode.
+
+    A batch analysis serves exactly one mode, so full-body (HOG) person detection is skipped
+    for modes whose framing only follows faces: it found nothing those modes use, yet it was
+    about 3× the cost of the whole face analysis (measured: 44 s → 14 s for 60 s of 1080p).
+    """
+    features = settings.analysis_features()
+    if settings.tracking_mode in FACE_ONLY_MODES:
+        features = [f for f in features if f != "persons"]
+    return features
 
 
 def reframe_aspect(out_w: int, out_h: int) -> str | None:
@@ -347,7 +363,7 @@ def output_name(preset: RenderPreset, item: BatchItem, index: int, preset_name: 
     w, h = output_size(preset, item.metadata)
     fields = {"original_name": Path(item.path).stem, "preset": preset_name or "custom", "resolution": f"{w}x{h}",
               "width": w, "height": h, "codec": preset.output.codec, "index": f"{index:03d}"}
-    return render_name(preset.filename_template, fields) + ".mp4"
+    return render_name(preset.filename_template, fields) + preset.output.suffix
 
 
 def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwrite: bool, batch_id: str,
@@ -391,6 +407,10 @@ def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwr
         "effects": preset.effects.to_dict() if preset.effects.active else None,
         "captions_auto": dict(transcription) if auto else None,
         "color": preset.color.to_dict() | {"height": h} if preset.color.active else None,
+        # what the final check expects of the exported file (size only when it is set by the export)
+        "expect": {"width": w if preset.operation != "none" else None,
+                   "height": h if preset.operation != "none" else None,
+                   "fps": preset.output.target_fps()},
     }
     if caption_data is not None and preset.caption_animation:
         caption_data["animation"] = dict(preset.caption_animation)
@@ -407,11 +427,11 @@ def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwr
     if preset.operation == "reframe":
         settings = ReframeSettings.from_dict(tracking_defaults.to_dict())
         settings.tracking_mode = preset.tracking_mode
-        settings.preset = reframe_aspect(w, h)
+        settings.preset = reframe_aspect(w, h) or "custom"  # any other size: its own aspect ratio
         settings.output_width, settings.output_height = w, h
         settings.target, settings.switches = None, []
         settings.validate()
-        features = settings.analysis_features()
+        features = batch_analysis_features(settings)
         if "speech" in features and not meta.has_audio:
             raise BatchError(f"{item.name}: {settings.mode_info.label} needs an audio track.")
         payload["reframe_auto"] = {
@@ -420,6 +440,7 @@ def build_payload(item: BatchItem, preset: RenderPreset, output: Path, *, overwr
             "analysis": {"width": meta.display_width, "height": meta.display_height, "duration": meta.duration,
                          "sample_fps": settings.analysis_rate(), "detect_persons": "persons" in features,
                          "features": features, "face_threshold": settings.confidence_threshold,
+                         "long_side": int(settings.analysis_size),
                          "models_dir": models_dir},
         }
     elif preset.operation == "resize":

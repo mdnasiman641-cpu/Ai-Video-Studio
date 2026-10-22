@@ -18,7 +18,7 @@ from ai_video_studio.render.layout import ResizeSettings
 from ai_video_studio.render.output import OutputSettings
 from ai_video_studio.services import Services
 from ai_video_studio.ui.main_window import MainWindow
-from ai_video_studio.ui.pages.bulk import COL_CHECK, COL_STATUS
+from ai_video_studio.ui.pages.bulk import COL_CHECK, COL_STATUS, Q_ACTION, Q_STATUS
 from tests.conftest import make_sample_video, requires_ffmpeg
 
 pytestmark = requires_ffmpeg
@@ -88,7 +88,7 @@ def test_page_layout_and_switches_reach_the_export_jobs(qtbot, window, tmp_path)
     jobs = page.start()
     assert len(jobs) == 2
     p = jobs[0].payload  # the video with a .srt next to it
-    assert p["smartcut_auto"] and p["reframe_auto"]["settings"]["preset"] == "9:16"
+    assert p["smartcut_auto"] and p["reframe_auto"]["settings"]["preset"] == "1:1"  # the 160×160 size carries over
     assert p["captions"]["segments"][0]["text"] == "Hello"
     assert p["effects"]["video_speed"] == 1.5 and p["effects"]["volume"] == 80
     assert p["output_settings"]["encoder"] == "cpu" and p["output"].startswith(str(tmp_path / "out"))
@@ -128,8 +128,8 @@ def test_ticked_videos_apply_to_selected_and_sequential_real_exports(qtbot, wind
         meta = probe_video(item.output, find_tool("ffprobe"))
         assert (meta.width, meta.height) == (160, 160) and abs(meta.duration - 0.5) < 0.1  # 1 s at 2×
     page.refresh()
-    assert [page.queue_table.item(r, 3).text() for r in range(2)] == ["Completed", "Completed"]
-    assert page.queue_table.cellWidget(0, 5).text() == "Show File"
+    assert [page.queue_table.item(r, Q_STATUS).text() for r in range(2)] == ["Completed", "Completed"]
+    assert page.queue_table.cellWidget(0, Q_ACTION).text() == "Show File"
     assert page.counts["Completed"].text() == "2" and page.overall.value() == 100
     assert page.counts["Output size"].text() != "0 B"
     outputs = [i.output for i in page.batch.items[:2]]
@@ -151,7 +151,7 @@ def test_failed_video_does_not_stop_the_batch_and_can_be_retried(qtbot, window, 
     assert second.state is JobState.COMPLETED  # the batch went on
     page.refresh()
     assert page.table.item(0, COL_STATUS).text() == "Failed" and "not found" in page.details(page.batch.items[0])
-    assert page.queue_table.cellWidget(0, 5).text() == "Retry" and page.counts["Failed"].text() == "1"
+    assert page.queue_table.cellWidget(0, Q_ACTION).text() == "Retry" and page.counts["Failed"].text() == "1"
     shutil.move(str(backup), videos[0])
     page.retry_items([page.batch.items[0]])
     qtbot.waitUntil(lambda: window.services.jobs.store.get(first.id).state is JobState.COMPLETED, timeout=60000)

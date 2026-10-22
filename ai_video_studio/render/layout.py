@@ -34,7 +34,19 @@ MODES = {
     "custom": "Custom position and size",
     "reframe": "Auto Reframe — follow faces (uses the Auto Reframe analysis)",
 }
+# Aspect ratio × resolution choices (Bulk Processing output size). The resolution names the short
+# side, so "1080p" is 1920×1080 landscape, 1080×1920 vertical and 1080×1350 portrait.
+ASPECTS: dict[str, tuple[str, tuple[int, int] | None]] = {
+    "original": ("Original aspect ratio", None),
+    "16:9": ("16:9 Landscape", (16, 9)),
+    "9:16": ("9:16 Vertical", (9, 16)),
+    "1:1": ("1:1 Square", (1, 1)),
+    "4:5": ("4:5 Portrait", (4, 5)),
+    "custom": ("Custom size", None),
+}
+RESOLUTIONS = {0: "Source resolution", 720: "720p", 1080: "1080p", 1440: "1440p", 2160: "4K (2160p)"}
 MIN_SIZE, MAX_W, MAX_H = 64, 7680, 4320
+BLUR_DOWNSCALE = 4  # blur backgrounds are computed at 1/4 of the output size (see layout_filter)
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 ASPECT_NAMES = {(16, 9): "16:9", (9, 16): "9:16", (1, 1): "1:1", (4, 5): "4:5", (5, 4): "5:4", (4, 3): "4:3",
                 (3, 4): "3:4", (21, 9): "21:9", (2, 1): "2:1"}
@@ -86,6 +98,7 @@ class ResizeSettings:
     enabled: bool = True       # Edit page final export: resize/crop (or Auto Reframe) is switched on
     mode_before_reframe: str = ""  # the fixed mode to return to when Auto Reframe is switched off
     burn_set: bool = False     # burn-in was switched on/off by the user (otherwise: on when captions exist)
+    target_short: int = 0      # "original" size: scale so the short side has this many pixels (0 = keep)
 
     def validate(self) -> None:
         errors = []
@@ -99,6 +112,8 @@ class ResizeSettings:
                     errors.append(f"{name} must be an even number (required by H.264/H.265 in 4:2:0)")
         if self.mode not in MODES:
             errors.append(f"Unknown mode '{self.mode}'")
+        if int(self.target_short) and not 144 <= int(self.target_short) <= 4320:
+            errors.append("The output resolution must be between 144p and 4320p")
         if not (0 <= self.pos_x <= 1 and 0 <= self.pos_y <= 1):
             errors.append("Position must be between 0 and 100 %")
         if not 0.1 <= self.zoom <= 4:
@@ -117,7 +132,12 @@ class ResizeSettings:
         if self.preset == "custom":
             return int(self.width), int(self.height)
         size = PRESETS[self.preset][1]
-        return size if size else (max(2, even_floor(src_w)), max(2, even_floor(src_h)))
+        if size:
+            return size
+        if self.target_short and src_w > 0 and src_h > 0:  # keep the aspect ratio, scale to the resolution
+            k = int(self.target_short) / min(src_w, src_h)
+            return even(src_w * k), even(src_h * k)
+        return max(2, even_floor(src_w)), max(2, even_floor(src_h))
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -126,6 +146,45 @@ class ResizeSettings:
     def from_dict(cls, d: dict | None) -> "ResizeSettings":
         known = cls.__dataclass_fields__
         return cls(**{k: v for k, v in (d or {}).items() if k in known})
+
+
+def size_for(aspect: str, short_side: int) -> tuple[int, int] | None:
+    """Output size for an aspect ratio and a resolution (short side); None for original/custom."""
+    ratio = ASPECTS.get(aspect, ("", None))[1]
+    if ratio is None or not short_side:
+        return None
+    a, b = ratio
+    if a >= b:
+        return even(short_side * a / b), int(short_side)
+    return int(short_side), even(short_side * b / a)
+
+
+def settings_for_size(settings: "ResizeSettings", aspect: str, short_side: int, width: int = 0,
+                      height: int = 0) -> None:
+    """Point ``settings`` at an aspect ratio and resolution (or a custom width × height)."""
+    if aspect == "original":
+        settings.preset, settings.target_short = "original", int(short_side)
+        return
+    settings.target_short = 0
+    size = (int(width), int(height)) if aspect == "custom" else size_for(aspect, short_side)
+    if size is None:
+        raise LayoutError("Choose a resolution for this aspect ratio.")
+    key = f"{size[0]}x{size[1]}"
+    if key in PRESETS:
+        settings.preset = key
+    else:
+        settings.preset, settings.width, settings.height = "custom", size[0], size[1]
+
+
+def aspect_and_resolution(settings: "ResizeSettings") -> tuple[str, int]:
+    """The (aspect, resolution) choice that describes ``settings`` (the reverse of ``settings_for_size``)."""
+    if settings.preset == "original":
+        return "original", int(settings.target_short)
+    w, h = (int(settings.width), int(settings.height)) if settings.preset == "custom" else PRESETS[settings.preset][1]
+    for aspect, (_label, ratio) in ASPECTS.items():
+        if ratio and min(w, h) in RESOLUTIONS and size_for(aspect, min(w, h)) == (w, h):
+            return aspect, min(w, h)
+    return "custom", 0
 
 
 @dataclass(frozen=True)
@@ -239,10 +298,17 @@ def layout_filter(layout: Layout, src: str, dst: str) -> str:
     if L.background == "none":
         return f"[{src}]{fg}[{dst}]"
     if L.background == "blur":
-        radius = max(1, min(int(L.blur), min(L.out_w, L.out_h) // 4 - 1))
+        # The background is blurred at a quarter of the output size and scaled up: the result looks
+        # the same (SSIM ≈ 0.98 against blurring at full size) at a fraction of the cost, which was
+        # the slowest part of a blur-background export (measured: 60 s → 23 s of filtering for a
+        # 60 s 1080p clip to 1080×1920).
+        k = BLUR_DOWNSCALE if min(L.out_w, L.out_h) >= 64 * BLUR_DOWNSCALE else 1
+        bw, bh = even(L.out_w / k), even(L.out_h / k)
+        radius = max(1, min(round(int(L.blur) / k), min(bw, bh) // 4 - 1))
+        up = f",scale={L.out_w}:{L.out_h}:flags=bilinear" if k > 1 else ""
         return (f"[{src}]split=2[lfg][lbg];"
-                f"[lbg]scale={L.out_w}:{L.out_h}:force_original_aspect_ratio=increase:flags=bilinear,"
-                f"crop={L.out_w}:{L.out_h},boxblur=luma_radius={radius}:luma_power=2,setsar=1[lbgb];"
+                f"[lbg]scale={bw}:{bh}:force_original_aspect_ratio=increase:flags=bilinear,"
+                f"crop={bw}:{bh},boxblur=luma_radius={radius}:luma_power=2{up},setsar=1[lbgb];"
                 f"[lfg]{fg}[lfgs];[lbgb][lfgs]overlay=x={L.dst_x}:y={L.dst_y}[{dst}]")
     color = "0x" + L.color.lstrip("#")
     return f"[{src}]{fg},pad={L.out_w}:{L.out_h}:{L.dst_x}:{L.dst_y}:color={color}[{dst}]"

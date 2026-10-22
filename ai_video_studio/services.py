@@ -102,6 +102,9 @@ class Services:
         self.jobs.register(RENDER_FRAME_JOB, make_render_frame_handler(self.ffmpeg_path))
         self.jobs.register(RENDER_CLIP_JOB, make_render_clip_handler(self.ffmpeg_path))
         self.settings.subscribe(self._on_setting_changed)
+        from ai_video_studio.captions.transcriber import set_cpu_threads
+
+        set_cpu_threads(self.settings.get("transcription_threads"))
 
     def ffprobe_path(self) -> Path:
         return require_tool("ffprobe", self.settings.get("ffmpeg_dir"))
@@ -119,8 +122,8 @@ class Services:
                 return settings
             except (ValueError, TypeError, StudioError):
                 pass
-        encoder = {"h264_nvenc": "gpu", "libx264": "cpu"}.get(self.settings.get("video_encoder"), "auto")
-        return OutputSettings(encoder=encoder, quality="custom", crf=self.settings.get("video_quality"))
+        encoder = {"h264_nvenc": "nvenc", "libx264": "cpu"}.get(self.settings.get("video_encoder"), "auto")
+        return OutputSettings(encoder=encoder, mode="custom", quality="custom", crf=self.settings.get("video_quality"))
 
     def remember_output_settings(self, settings: OutputSettings) -> None:
         settings.validate()
@@ -151,6 +154,10 @@ class Services:
             self.jobs.set_max_concurrent(value)
         elif key == "max_concurrent_renders":
             self.jobs.set_max_heavy(value)
+        elif key == "transcription_threads":
+            from ai_video_studio.captions.transcriber import set_cpu_threads
+
+            set_cpu_threads(value)
         elif key == "log_level":
             from ai_video_studio.core.logging_setup import set_level
 

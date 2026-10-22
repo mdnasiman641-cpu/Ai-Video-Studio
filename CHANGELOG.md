@@ -9,6 +9,59 @@ colour grading, video filters and caption animations. Project files become versi
 optional keys; version 1-6 files open unchanged).
 
 ### Added
+- **Export modes:** Draft / Fast Preview, Fast Export, Standard / Balanced (default), High Quality,
+  Maximum Quality and Custom.
+  - Each mode has its own CRF/CQ, x264/x265 preset, NVENC preset (two-pass for High and
+    Maximum), Quick Sync and AMF settings, and audio bitrate. The table is in `render/output.py`.
+  - Custom adds the CPU preset, container (MP4, MOV, MKV), hardware decoding, bitrate and every
+    older setting.
+  - Saved settings without a mode load as Custom and encode exactly as before.
+- **Hardware detection** (Bulk Processing → Hardware):
+  - Reports the CPU, cores, memory, GPUs, FFmpeg version and hardware decoders.
+  - NVENC, Quick Sync and AMF encoders count as usable only after a test encode succeeds.
+  - Unusable encoders are marked in the encoder list with FFmpeg's reason.
+  - "Use Recommended" sets Auto and the number of exports at a time for this PC.
+- **Encoder choice:**
+  - Auto tries NVENC, Quick Sync, AMF, then the CPU.
+  - A chosen GPU encoder falls back to the CPU only when allowed (the option is on by default).
+  - Every fallback is listed in the export's notes. Results and the queue show the encoder really
+    used.
+- **Output size:**
+  - Aspect ratio (Original, 16:9, 9:16, 1:1, 4:5, Custom) × resolution (720p, 1080p, 1440p, 4K).
+  - Custom width × height with an aspect lock; even sizes only.
+  - Fit modes: Fill and crop, Fit with blurred or colour background.
+  - "Original aspect ratio" at a chosen resolution.
+  - Auto Reframe accepts any custom output size, cropping at that ratio without stretching.
+- **Export preview:** aspect ratio, output resolution, resolution preset, quality, encoder,
+  processing mode (GPU or CPU) and file name, computed from the same values the export uses.
+  Upscaling and Draft quality are pointed out.
+- **Queue and progress:**
+  - New queue columns: output size and aspect, and the export mode with the encoder used.
+  - Live details: current step, encoder, FFmpeg speed, elapsed time and an estimate from real
+    progress.
+  - Batch summary adds elapsed time, remaining time and the current step.
+  - New buttons: Cancel Batch and View Log (steps with their times, encoder, notes, errors).
+  - Select Folder ticks the videos of one folder. Duplicate Preset was added.
+- **Exports are checked more thoroughly:** file exists and is not empty, readable, expected
+  width × height, expected duration, expected frame rate and audio when required. A failing
+  file is removed and the job fails with the reason.
+- **Settings:** Tracking → Analysis frame size (640/960/1280 px); Captions → CPU threads.
+
+### Changed (performance; measurements in documentation/PERFORMANCE.md)
+- Bulk Auto Reframe in Auto Face and Active Speaker modes no longer runs full-body (HOG)
+  person detection, which those modes never used. Analysis is 3.1× faster (44 s → 14 s per
+  minute of 1080p on the test machine).
+- Blurred backgrounds are computed at a quarter of the output size and scaled up, which looks
+  the same (SSIM 0.98). A 1080×1920 blur export went from 84 s to 55 s for a 60 s clip.
+- Captions (Whisper), Smart Cut audio levels and face tracking are cached per file and
+  settings in the temp folder. Retrying or exporting the same video again reuses them. The
+  Captions and Smart Cut pages fill the cache too. A changed file or other settings never
+  reuse an old result.
+- Whisper on the CPU uses one thread per physical core (faster-whisper's default is 4).
+- Each export records the time of each step (captions, Smart Cut, Auto Reframe, render,
+  check).
+
+### Added (colour grading, video filters, caption animations)
 - **Colour grading (Bulk Processing):**
   - Looks: Original, Natural, Cinematic, Teal & Orange, Warm Film, Cool Cinematic, Vintage Film,
     Moody Dark, Bright & Clean, Black & White and Custom.

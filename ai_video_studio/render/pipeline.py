@@ -159,9 +159,17 @@ def render_args(
     encoder: EncoderSettings,
     output: str,
     workdir: Path | None = None,
+    hw_decode: bool = False,
 ) -> list[str]:
-    """The FFmpeg command. A long ``graph`` is written to ``workdir/graph.txt``."""
-    args = [str(ffmpeg), "-hide_banner", "-nostdin", "-y", "-i", str(source)]
+    """The FFmpeg command. A long ``graph`` is written to ``workdir/graph.txt``.
+
+    ``hw_decode`` adds ``-hwaccel auto``: FFmpeg decodes on the GPU when it can and copies the
+    frames to system memory for the filters; when it cannot, it decodes on the CPU as usual.
+    """
+    args = [str(ffmpeg), "-hide_banner", "-nostdin", "-y"]
+    if hw_decode:
+        args += ["-hwaccel", "auto"]
+    args += ["-i", str(source)]
     if len(graph) > INLINE_GRAPH_LIMIT and workdir is not None:
         (Path(workdir) / GRAPH_FILE).write_text(graph, encoding="utf-8")
         args += ["-filter_complex_script", GRAPH_FILE]
@@ -179,5 +187,8 @@ def render_args(
         args += ["-c:a", "copy"]
     elif audio_mode != "none":
         args += ["-c:a", "aac", "-b:a", encoder.audio_bitrate]
-    args += ["-map_metadata", "0", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
+    args += ["-map_metadata", "0"]
+    if str(output).lower().endswith((".mp4", ".mov")):
+        args += ["-movflags", "+faststart"]  # index at the front: starts playing before it is fully loaded
+    args += ["-progress", "pipe:1", "-nostats", str(output)]
     return args

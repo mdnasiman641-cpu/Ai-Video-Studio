@@ -470,6 +470,7 @@ class ProjectController(QObject):
             "width": meta.display_width, "height": meta.display_height, "duration": meta.duration,
             "sample_fps": settings.analysis_rate(), "detect_persons": "persons" in features,
             "features": features, "face_threshold": settings.confidence_threshold,
+            "long_side": int(settings.analysis_size),
             "models_dir": str(paths.data_dir() / "models"),
         }
         return self.services.jobs.submit(REFRAME_ANALYZE_JOB, f"Analyse faces/people: {item.name}", payload,
@@ -733,6 +734,8 @@ class ProjectController(QObject):
             "stage": stage, "ass": ass, "output_settings": settings.to_dict(), "preview": preview,
             # switched-on speed/audio settings always go to the job (no-op values add no filters)
             "effects": effects.to_dict() if effects.speed_enabled or effects.audio_enabled else None,
+            "expect": {"width": out_w if canvas and not preview else None,
+                       "height": out_h if canvas and not preview else None, "fps": settings.target_fps()},
         }
         return self.services.jobs.submit(RENDER_JOB, title or f"Export edited video: {item.name}", payload,
                                          project_id=self.project.id)

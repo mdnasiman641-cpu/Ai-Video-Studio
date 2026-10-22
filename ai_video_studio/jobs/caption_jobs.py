@@ -17,6 +17,7 @@ from ai_video_studio.captions.correction import request_corrections
 from ai_video_studio.captions.models import WHISPER_MODELS, ModelMissingError, download_model, installed_path
 from ai_video_studio.captions.transcriber import TranscriptionOptions, transcribe_file
 from ai_video_studio.core import paths
+from ai_video_studio.storage import analysis_cache
 from ai_video_studio.core.errors import MediaError, StudioError
 from ai_video_studio.core.fs import remove_tree
 from ai_video_studio.core.ffmpeg_commands import (
@@ -138,6 +139,11 @@ class _Scaled:
         self._ctx.check_cancelled()
 
 
+def transcript_cache_config(p: dict) -> dict:
+    """The settings a transcript depends on (``storage.analysis_cache``): model, language and caption length."""
+    return {k: p.get(k) for k in ("model", "language", "model_path", "max_chars", "max_seconds")}
+
+
 def make_transcribe_handler(get_ffmpeg: Callable[[], Path], model_factory=None, cuda_devices: int | None = None):
     def handle(job: Job, ctx: JobContext) -> dict:
         p = job.payload
@@ -149,6 +155,10 @@ def make_transcribe_handler(get_ffmpeg: Callable[[], Path], model_factory=None, 
         if p.get("model") and not p.get("model_path"):
             result.track.source = f"whisper:{p['model']}"
             result.model = p["model"]
+        if result.track.segments:  # Bulk Processing can reuse it for this file and these settings
+            analysis_cache.put("transcript", p["path"], transcript_cache_config(p), {
+                "segments": [s.to_dict() for s in result.track.segments], "language": result.language,
+                "device": result.device})
         return {
             "media_id": p.get("media_id"),
             "track": result.track.to_dict(),

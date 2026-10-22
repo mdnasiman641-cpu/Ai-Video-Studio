@@ -40,6 +40,12 @@ class JobContext:
         if self.cancel_event.is_set():
             raise JobCancelled("Cancelled by user")
 
+    def set_detail(self, **info) -> None:
+        """Live information for the UI while the job runs (e.g. ``encoder``, ``speed``, ``step``).
+
+        Kept in memory only: it describes the running job and is dropped when it finishes."""
+        self._manager._detail(self.job.id, info)
+
 
 class JobHandler(Protocol):
     def __call__(self, job: Job, ctx: JobContext) -> dict | None: ...
@@ -53,6 +59,7 @@ class JobManager:
         self._max_heavy = max(1, int(max_heavy))
         self._listeners: list[Callable[[Job], None]] = []
         self._running: dict[str, JobContext] = {}
+        self._details: dict[str, dict] = {}  # live details of running jobs (JobContext.set_detail)
         self._lock = threading.RLock()
         self._max_concurrent = max(1, int(max_concurrent))
         self._paused = False
@@ -242,10 +249,21 @@ class JobManager:
             log.exception("Job crashed", extra={"job_id": job.id})
         with self._lock:
             self._running.pop(job.id, None)
+            self._details.pop(job.id, None)
         self._notify(final)
         self.dispatch()
         with self._idle:
             self._idle.notify_all()
+
+    def detail(self, job_id: str) -> dict:
+        """The running job's live details (see ``JobContext.set_detail``)."""
+        with self._lock:
+            return dict(self._details.get(job_id, {}))
+
+    def _detail(self, job_id: str, info: dict) -> None:
+        with self._lock:
+            self._details.setdefault(job_id, {}).update(info)
+        self._notify(self.store.get(job_id))
 
     def _stage(self, job_id: str, stage: str) -> None:
         self.store.set_stage(job_id, stage)

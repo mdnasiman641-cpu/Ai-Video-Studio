@@ -375,6 +375,7 @@ class ReframeSettings:
     burn_captions: bool = True
     analysis_fps: float = 5.0        # frames analysed per second (face tracking)
     av_fps: float = 15.0             # frames analysed per second when mouth movement is needed
+    analysis_size: float = 960.0     # longer side (pixels) of the analysed frames; smaller is faster
     detect_persons: bool = True      # look for full bodies in frames without faces
 
     @property
@@ -411,7 +412,10 @@ class ReframeSettings:
         errors = []
         if self.tracking_mode not in TRACKING_MODES:
             errors.append(f"Unknown tracking mode '{self.tracking_mode}'")
-        if self.preset not in ASPECT_PRESETS:
+        if self.preset == "custom":
+            if not (self.output_width and self.output_height):
+                errors.append("A custom aspect ratio needs an output width and height")
+        elif self.preset not in ASPECT_PRESETS:
             errors.append(f"Unknown aspect preset '{self.preset}'")
         if self.output_width < 0 or self.output_height < 0 or (self.output_width == 0) != (self.output_height == 0):
             errors.append("Output size must be both set or both automatic")
@@ -425,6 +429,7 @@ class ReframeSettings:
             "transition_seconds": (0.0, 5.0), "confidence_threshold": (0.3, 0.99),
             "speech_threshold": (0.1, 0.95), "switch_seconds": (0.0, 5.0), "speaker_hold_seconds": (0.0, 15.0),
             "caption_safe_height": (0.05, 0.5), "analysis_fps": (0.5, 30.0), "av_fps": (5.0, 30.0),
+            "analysis_size": (480.0, 1920.0),
         }
         for name, (low, high) in ranges.items():
             value = getattr(self, name)

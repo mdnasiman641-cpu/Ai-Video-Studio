@@ -261,6 +261,11 @@ class SettingsPage(QWidget):
             self.transcription_language.addItem(name, code)
         self.caption_max_chars = QSpinBox()
         self.caption_max_chars.setRange(10, 120)
+        self.transcription_threads = QSpinBox()
+        self.transcription_threads.setRange(0, 64)
+        self.transcription_threads.setSpecialValueText("Automatic (one per CPU core)")
+        self.transcription_threads.setToolTip("CPU threads for speech recognition when it runs on the CPU. "
+                                              "Automatic uses one thread per physical core.")
         self.caption_max_seconds = QSpinBox()
         self.caption_max_seconds.setRange(1, 20)
         self.caption_max_seconds.setSuffix(" s")
@@ -270,6 +275,7 @@ class SettingsPage(QWidget):
         cform.addRow("Whisper model:", self.whisper_model)
         cform.addRow("Local model folder:", model_row)
         cform.addRow("Device:", self.transcription_device)
+        cform.addRow("CPU threads:", self.transcription_threads)
         cform.addRow("Default language:", self.transcription_language)
         cform.addRow("Max characters per caption:", self.caption_max_chars)
         cform.addRow("Max duration per caption:", self.caption_max_seconds)
@@ -391,6 +397,7 @@ class SettingsPage(QWidget):
             "transcription_language": self.transcription_language.currentData(),
             "caption_max_chars": self.caption_max_chars.value(),
             "caption_max_seconds": self.caption_max_seconds.value(),
+            "transcription_threads": self.transcription_threads.value(),
             "video_encoder": self.video_encoder.currentData(),
             "video_quality": self.video_quality.value(),
             "export_output_settings": self._output_json(),
@@ -416,6 +423,7 @@ class SettingsPage(QWidget):
         self.whisper_model.setCurrentText(s.get("whisper_model"))
         self.whisper_model_dir.setText(s.get("whisper_model_dir"))
         self.transcription_device.setCurrentIndex(self.transcription_device.findData(s.get("transcription_device")))
+        self.transcription_threads.setValue(s.get("transcription_threads"))
         self.transcription_language.setCurrentIndex(
             max(0, self.transcription_language.findData(s.get("transcription_language"))))
         self.caption_max_chars.setValue(s.get("caption_max_chars"))

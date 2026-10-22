@@ -18,7 +18,7 @@ from ai_video_studio.jobs.caption_jobs import SUBTITLE_FILE, job_temp_dir
 from ai_video_studio.jobs.encode import encode_with_fallback, ffmpeg_error
 from ai_video_studio.jobs.manager import JobContext
 from ai_video_studio.jobs.models import Job
-from ai_video_studio.reframe.analysis import analyze_video
+from ai_video_studio.reframe.analysis import ANALYSIS_LONG_SIDE, analyze_video
 from ai_video_studio.reframe.detection import DetectorSet, build_detectors
 from ai_video_studio.reframe.export import (
     CROP_COMMAND_FILE,
@@ -79,7 +79,7 @@ def run_tracking_analysis(p: dict, ffmpeg: Path, ctx: JobContext, factory: Detec
         analysis = analyze_video(
             ffmpeg, str(source), width, height, duration, sample_fps, detectors, detectors.description,
             progress=lambda f: report(f * video_share), cancel_event=ctx.cancel_event,
-            features=features, face_threshold=face_threshold,
+            features=features, face_threshold=face_threshold, long_side=int(p.get("long_side", ANALYSIS_LONG_SIDE)),
         )
     else:
         analysis = TrackingAnalysis(width=width, height=height, duration=duration, sample_fps=sample_fps,

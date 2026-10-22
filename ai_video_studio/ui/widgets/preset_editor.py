@@ -38,7 +38,7 @@ from ai_video_studio.core.errors import StudioError
 from ai_video_studio.reframe.model import TRACKING_MODES
 from ai_video_studio.render.batch import BATCH_RESIZE_MODES, BATCH_TRACKING_MODES, RenderPreset, reframe_aspect
 from ai_video_studio.render.color import ColorSettings
-from ai_video_studio.render.layout import MODES, PRESETS, ResizeSettings
+from ai_video_studio.render.layout import PRESETS, ResizeSettings
 from ai_video_studio.render.naming import TEMPLATE_FIELDS
 from ai_video_studio.smartcut.model import SmartCutSettings
 from ai_video_studio.ui.widgets.caption_animation import AnimationEditor
@@ -48,10 +48,13 @@ from ai_video_studio.ui.widgets.color_grading import ColorGradeForm, FilterPicke
 from ai_video_studio.ui.widgets.common import muted
 from ai_video_studio.ui.widgets.effects_form import EffectsForm
 from ai_video_studio.ui.widgets.output_settings import OutputSettingsForm
+from ai_video_studio.ui.widgets.output_size import OutputSizePicker
 
 OWN_STYLE = "__own__"
 PRESET_STYLE = "__preset__"
 REFRAME_SIZES = [k for k, (_label, size) in PRESETS.items() if size and reframe_aspect(*size)]
+FIT_LABELS = {"fill": "Fill and crop", "blur": "Fit with blurred background", "fit": "Fit with colour background",
+              "custom": "Custom position and zoom"}
 
 
 def _slider() -> QSlider:
@@ -121,12 +124,10 @@ class PresetEditor(QWidget):
         self.tracking = QComboBox()
         for key in BATCH_TRACKING_MODES:
             self.tracking.addItem(TRACKING_MODES[key].label, key)
-        self.reframe_size = QComboBox()
-        for key in REFRAME_SIZES:
-            self.reframe_size.addItem(PRESETS[key][0], key)
+        self.reframe_size = OutputSizePicker(allow_original=False)
         f = self.reframe_card.form
         f.addRow("Tracking mode:", self.tracking)
-        f.addRow("Output size:", self.reframe_size)
+        f.addRow(self.reframe_size)
         f.addRow(muted("Each video is analysed during its export with the tracking defaults from Settings."))
 
         # -- Captions --
@@ -151,17 +152,12 @@ class PresetEditor(QWidget):
 
         # -- Resize / Crop --
         self.resize_card = ToolCard("Resize / Crop", "Set the resolution and framing of every video", "#ff9f43")
-        self.size = QComboBox()
-        for key, (label, _s) in PRESETS.items():
-            self.size.addItem(label, key)
-        self.width_spin, self.height_spin = QSpinBox(), QSpinBox()
-        for box, limit in ((self.width_spin, 7680), (self.height_spin, 4320)):
-            box.setRange(64, limit)
-            box.setSingleStep(2)
-            box.setKeyboardTracking(False)
+        self.size = OutputSizePicker()
         self.mode = QComboBox()
         for key in BATCH_RESIZE_MODES:
-            self.mode.addItem(MODES[key].split(" —")[0], key)
+            self.mode.addItem(FIT_LABELS[key], key)
+        self.mode.setToolTip("Fill and crop: no bars, the edges are cut. Fit: the whole picture, on a blurred copy "
+                             "or a colour. The picture is never stretched.")
         self.pos_x, self.pos_y = _slider(), _slider()
         self.zoom = QSpinBox()
         self.zoom.setRange(10, 400)
@@ -170,15 +166,10 @@ class PresetEditor(QWidget):
         self.blur.setRange(1, 60)
         self.color_button = QPushButton("Background colour…")
         f = self.resize_card.form
-        f.addRow("Output size:", self.size)
-        dims = QHBoxLayout()
-        dims.addWidget(self.width_spin)
-        dims.addWidget(QLabel("×"))
-        dims.addWidget(self.height_spin)
-        f.addRow("Custom size:", dims)
-        f.addRow("Mode:", self.mode)
-        f.addRow("Position X:", self.pos_x)
-        f.addRow("Position Y:", self.pos_y)
+        f.addRow(self.size)
+        f.addRow("Fit mode:", self.mode)
+        f.addRow("Crop position X:", self.pos_x)
+        f.addRow("Crop position Y:", self.pos_y)
         f.addRow("Zoom:", self.zoom)
         f.addRow("Blur strength:", self.blur)
         f.addRow("Background:", self.color_button)
@@ -254,10 +245,11 @@ class PresetEditor(QWidget):
         self.animation.changed.connect(self._emit)
         self.grade.changed.connect(self._emit)
         self.filters.changed.connect(self._emit)
-        for box in (self.tracking, self.reframe_size, self.caption_style, self.size, self.mode):
+        for box in (self.tracking, self.caption_style, self.mode):
             box.currentIndexChanged.connect(self._emit)
-        for box in (self.threshold, self.min_silence, self.min_keep, self.width_spin, self.height_spin, self.zoom,
-                    self.blur, self.pos_x, self.pos_y):
+        self.size.changed.connect(self._emit)
+        self.reframe_size.changed.connect(self._emit)
+        for box in (self.threshold, self.min_silence, self.min_keep, self.zoom, self.blur, self.pos_x, self.pos_y):
             box.valueChanged.connect(self._emit)
         self.auto_captions.toggled.connect(self._emit)
         self.effects.changed.connect(self._emit)
@@ -315,12 +307,12 @@ class PresetEditor(QWidget):
             self.reframe_card.toggle.setChecked(p.operation == "reframe")
             self.resize_card.toggle.setChecked(p.operation == "resize")
             self.tracking.setCurrentIndex(max(0, self.tracking.findData(p.tracking_mode)))
-            index = self.reframe_size.findData(p.resize.preset)
-            self.reframe_size.setCurrentIndex(index if index >= 0 else self.reframe_size.findData("1080x1920"))
-            self.size.setCurrentIndex(max(0, self.size.findData(p.resize.preset)))
+            self.size.set_from(p.resize)
+            reframe = ResizeSettings.from_dict(p.resize.to_dict())
+            if reframe.preset == "original":
+                reframe.preset = "1080x1920"
+            self.reframe_size.set_from(reframe)
             self.mode.setCurrentIndex(max(0, self.mode.findData(p.resize.mode)))
-            self.width_spin.setValue(int(p.resize.width))
-            self.height_spin.setValue(int(p.resize.height))
             self.pos_x.setValue(round(p.resize.pos_x * 100))
             self.pos_y.setValue(round(p.resize.pos_y * 100))
             self.zoom.setValue(round(p.resize.zoom * 100))
@@ -394,8 +386,7 @@ class PresetEditor(QWidget):
         reframe = self.reframe_card.toggle.isChecked()
         operation = "reframe" if reframe else ("resize" if self.resize_card.toggle.isChecked() else "none")
         resize = ResizeSettings.from_dict(self._resize.to_dict())
-        resize.preset = self.reframe_size.currentData() if reframe else self.size.currentData()
-        resize.width, resize.height = self.width_spin.value(), self.height_spin.value()
+        (self.reframe_size if reframe else self.size).apply_to(resize)
         resize.mode = self.mode.currentData()
         resize.pos_x, resize.pos_y = self.pos_x.value() / 100, self.pos_y.value() / 100
         resize.zoom = self.zoom.value() / 100
@@ -431,9 +422,6 @@ class PresetEditor(QWidget):
         return [name for card, name in cards if card.toggle.isChecked()]
 
     def _update_enabled(self) -> None:
-        custom = self.size.currentData() == "custom"
-        self.width_spin.setEnabled(custom)
-        self.height_spin.setEnabled(custom)
         mode = self.mode.currentData()
         self.pos_x.setEnabled(mode in ("fill", "custom"))
         self.pos_y.setEnabled(mode in ("fill", "custom"))

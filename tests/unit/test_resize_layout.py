@@ -107,8 +107,10 @@ def test_filters_for_each_background():
     assert pad == ("[a]crop=1920:1080:0:0,scale=1080:608:flags=lanczos,setsar=1,"
                    "pad=1080:1920:0:656:color=0x112233[b]")
     blur = layout_filter(lay((1920, 1080), preset="1080x1920", mode="blur", blur=30), "a", "b")
-    assert "split=2[lfg][lbg]" in blur and "boxblur=luma_radius=30" in blur and "overlay=x=0:y=656[b]" in blur
-    assert "force_original_aspect_ratio=increase" in blur
+    assert "split=2[lfg][lbg]" in blur and "overlay=x=0:y=656[b]" in blur
+    # blurred at a quarter of the output size (radius 30 → 8), then scaled back up to the canvas
+    assert "scale=270:480:force_original_aspect_ratio=increase" in blur and "crop=270:480" in blur
+    assert "boxblur=luma_radius=8:luma_power=2,scale=1080:1920:flags=bilinear" in blur
     tiny = layout_filter(lay((1920, 1080), preset="custom", width=64, height=96, mode="blur", blur=60), "a", "b")
     assert "boxblur=luma_radius=15" in tiny  # limited by the frame size
     fill = frame_filter(lay((1920, 1080), preset="1080x1920", mode="fill"))

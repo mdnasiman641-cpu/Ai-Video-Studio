@@ -105,8 +105,9 @@ def test_output_settings_validation_and_notes():
     s = OutputSettings()
     s.validate()
     assert s.crf_value == 21 and s.target_bitrate is None and s.target_fps() is None
-    assert OutputSettings(quality="custom", crf=30).crf_value == 30
-    assert OutputSettings(rate_control="bitrate", bitrate_kbps=5000).target_bitrate == 5000
+    assert OutputSettings(mode="custom", quality="custom", crf=30).crf_value == 30
+    assert OutputSettings(quality="custom", crf=30).crf_value == 21  # a fixed mode decides the quality
+    assert OutputSettings(mode="custom", rate_control="bitrate", bitrate_kbps=5000).target_bitrate == 5000
     for bad in (dict(codec="vp9"), dict(fps="23"), dict(audio_bitrate=100), dict(bitrate_kbps=10), dict(crf=60)):
         with pytest.raises(OutputSettingsError):
             OutputSettings(**bad).validate()

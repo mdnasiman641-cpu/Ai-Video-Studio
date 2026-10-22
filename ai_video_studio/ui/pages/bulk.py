@@ -18,9 +18,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QSize, QStandardPaths, Qt, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QSize, QStandardPaths, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -52,7 +54,7 @@ from PySide6.QtWidgets import (
 
 from ai_video_studio.captions.models import installed_path
 from ai_video_studio.captions.srt import read_srt_file
-from ai_video_studio.core import paths
+from ai_video_studio.core import hardware, paths
 from ai_video_studio.core.errors import StudioError
 from ai_video_studio.core.ffmpeg_tools import VideoMetadata
 from ai_video_studio.core.media import format_duration, validate_video_path
@@ -71,6 +73,7 @@ from ai_video_studio.render.batch import (
     output_size,
     preset_summary,
 )
+from ai_video_studio.render.layout import aspect_text
 from ai_video_studio.render.naming import CONFLICT_POLICIES, path_key, plan_outputs
 from ai_video_studio.storage.settings import REFRAME_DEFAULT_KEYS
 from ai_video_studio.ui.caption_dialogs import FramePreviewDialog
@@ -85,7 +88,8 @@ log = logging.getLogger(__name__)
 COLUMNS = ["", "", "Video", "Duration", "Resolution", "Size", "Settings", "Status", "Preview", ""]
 COL_CHECK, COL_THUMB, COL_VIDEO, COL_DURATION, COL_RESOLUTION, COL_SIZE, COL_SETTINGS, COL_STATUS, COL_PREVIEW, \
     COL_REMOVE = range(len(COLUMNS))
-QUEUE_COLUMNS = ["#", "Video", "Progress", "Status", "Details", "Action"]
+QUEUE_COLUMNS = ["#", "Video", "Output", "Export mode", "Progress", "Status", "Details", "Action"]
+Q_OUTPUT, Q_MODE, Q_PROGRESS, Q_STATUS, Q_DETAILS, Q_ACTION = 2, 3, 4, 5, 6, 7
 STATUS_LABELS = {
     "waiting": "Waiting", "held": "Waiting (paused)", "analyzing": "Processing", "ready": "Ready",
     "rendering": "Processing", "completed": "Completed", "failed": "Failed", "cancelled": "Cancelled",
@@ -128,6 +132,26 @@ class _ThumbSignals(QObject):
     ready = Signal(str, str)  # video path, image path
 
 
+class _HardwareSignals(QObject):
+    ready = Signal(object)  # core.hardware.HardwareInfo
+
+
+class _HardwareJob(QRunnable):
+    """Hardware and encoder detection off the GUI thread (a few short test encodes)."""
+
+    def __init__(self, ffmpeg: Path | None, refresh: bool, signals: _HardwareSignals):
+        super().__init__()
+        self.ffmpeg, self.refresh, self.signals = ffmpeg, refresh, signals
+
+    def run(self) -> None:
+        try:
+            info = hardware.detect(self.ffmpeg, refresh=self.refresh)
+        except Exception:  # noqa: BLE001 - detection must never break the page
+            log.exception("Hardware detection failed")
+            info = None
+        self.signals.ready.emit(info)
+
+
 class _ThumbJob(QRunnable):
     """Grab one small frame with FFmpeg off the GUI thread (cached in the temp folder)."""
 
@@ -157,7 +181,7 @@ class SourcePreviewDialog(QDialog):
         self.preview = VideoPreview()
         layout = QVBoxLayout(self)
         layout.addWidget(self.preview)
-        layout.addWidget(muted("The original video. Use Preview Settings to see one frame with the batch settings."))
+        layout.addWidget(muted("The original video. Use Preview to see one frame with the batch settings."))
         self.resize(820, 560)
         self.preview.load(path, fps)
 
@@ -165,6 +189,42 @@ class SourcePreviewDialog(QDialog):
         self.preview.player.stop()
         self.preview.load(None)
         super().done(result)
+
+
+def format_seconds(seconds: float) -> str:
+    seconds = int(round(max(0.0, seconds)))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"
+
+
+def seconds_since(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        start = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - start).total_seconds()
+
+
+class LogDialog(QDialog):
+    def __init__(self, parent: QWidget | None, name: str, text: str):
+        super().__init__(parent)
+        self.setWindowTitle(f"Export log: {name}")
+        view = QPlainTextEdit(text)
+        view.setReadOnly(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        logs = buttons.addButton("Open Logs Folder", QDialogButtonBox.ButtonRole.ActionRole)
+        logs.clicked.connect(lambda: open_folder(str(paths.logs_dir())))
+        layout = QVBoxLayout(self)
+        layout.addWidget(view, 1)
+        layout.addWidget(buttons)
+        self.text = text
+        self.resize(760, 460)
 
 
 class BeforeAfterDialog(QDialog):
@@ -206,6 +266,8 @@ class BulkPage(QWidget):
         self._thumb_pool.setMaxThreadCount(2)
         self._thumb_signals = _ThumbSignals()
         self._thumb_signals.ready.connect(self._on_thumbnail)
+        self._starting = False
+        self.hardware = None
         self._frame_cache: dict[str, str] = {}               # frame payload -> rendered image (Before / After)
         self._compare_jobs: dict[str, tuple[str, str]] = {}  # job id -> (side, cache key)
         self._preview_job: str | None = None
@@ -231,8 +293,10 @@ class BulkPage(QWidget):
         menu = QMenu(self)
         self.update_preset_button = QAction("Update Preset with Current Settings", self)
         self.rename_preset_button = QAction("Rename Preset…", self)
+        self.duplicate_preset_button = QAction("Duplicate Preset…", self)
         self.delete_preset_button = QAction("Delete Preset…", self)
-        for action in (self.update_preset_button, self.rename_preset_button, self.delete_preset_button):
+        for action in (self.update_preset_button, self.rename_preset_button, self.duplicate_preset_button,
+                       self.delete_preset_button):
             menu.addAction(action)
         self.preset_menu_button.setMenu(menu)
         head = QHBoxLayout()
@@ -251,6 +315,13 @@ class BulkPage(QWidget):
         self.remove_button = QPushButton("Remove Selected")
         self.clear_button = QPushButton("Clear All")
         self.select_all = QCheckBox("Select all")
+        self.folder_button = QToolButton()
+        self.folder_button.setText("Select Folder ▾")
+        self.folder_button.setToolTip("Tick only the videos of one folder (then use Apply to Selected).")
+        self.folder_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.folder_menu = QMenu(self)
+        self.folder_menu.aboutToShow.connect(self._fill_folder_menu)
+        self.folder_button.setMenu(self.folder_menu)
         self.selected_label = QLabel("")
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -275,6 +346,7 @@ class BulkPage(QWidget):
             tools.addWidget(w)
         tools.addStretch(1)
         tools.addWidget(self.select_all)
+        tools.addWidget(self.folder_button)
         tools.addWidget(self.selected_label)
         list_layout.addLayout(tools)
         list_layout.addWidget(self.table, 1)
@@ -286,14 +358,15 @@ class BulkPage(QWidget):
         self.apply_selected_button = QPushButton("Apply to Selected")
         self.apply_selected_button.setToolTip("Give the ticked videos their own copy of these settings. The others "
                                               "keep following the shared settings.")
-        self.shared_button = QPushButton("Reset Selected Video Settings")
-        self.shared_button.setToolTip("The ticked videos lose their own settings and follow the shared settings "
-                                      "again.")
-        self.all_shared_button = QPushButton("Apply to All Videos")
-        self.all_shared_button.setToolTip("Every video uses these shared settings (removes per-video settings).")
-        self.edit_item_button = QPushButton("Edit Video Settings…")
+        self.shared_button = QPushButton("Reset Selected")
+        self.shared_button.setToolTip("Reset Selected Video Settings: the ticked videos lose their own settings "
+                                      "and follow the shared settings again.")
+        self.all_shared_button = QPushButton("Apply to All")
+        self.all_shared_button.setToolTip("Apply to All Videos: every video uses these shared settings (removes "
+                                          "per-video settings).")
+        self.edit_item_button = QPushButton("Edit Video…")
         self.edit_item_button.setToolTip("Edit the settings of the highlighted video only (it gets its own settings).")
-        self.preview_button = QPushButton("Preview Settings")
+        self.preview_button = QPushButton("Preview")
         self.preview_button.setToolTip("Render one frame of the highlighted (or first ticked) video with its settings "
                                        "(framing and caption style), without exporting the video.")
         self.settings_error = QLabel("")
@@ -332,11 +405,32 @@ class BulkPage(QWidget):
         orow.addWidget(self.output_dir, 1)
         orow.addWidget(self.browse_button)
         form.addRow("Output folder:", orow)
-        form.addRow("Format:", QLabel("MP4"))
         form.addRow("File name:", self.editor.template)
         form.addRow("If the file exists:", self.conflict)
+        self.resolved = QLabel()
+        self.resolved.setObjectName("Resolved")
+        self.resolved.setWordWrap(True)
+        self.resolved.setTextFormat(Qt.TextFormat.RichText)
+        self.resolved.setStyleSheet(f"QLabel#Resolved {{ border: 1px solid {TEAL}; border-radius: 8px; "
+                                    "padding: 8px; }")
+        self.hardware_label = muted("Hardware: not detected yet.")
+        self.hardware_label.setWordWrap(True)
+        self.detect_button = QPushButton("Detect Hardware")
+        self.detect_button.setToolTip("Check the CPU, memory, GPUs and which FFmpeg encoders really work here "
+                                      "(a short test encode each).")
+        self.recommend_button = QPushButton("Use Recommended")
+        self.recommend_button.setToolTip("Auto encoder and the recommended number of exports at the same time.")
+        self.recommend_button.setEnabled(False)
+        hw_row = QHBoxLayout()
+        hw_row.addWidget(self.detect_button)
+        hw_row.addWidget(self.recommend_button)
         out_layout.addLayout(form)
+        out_layout.addWidget(section_title("Export preview"))
+        out_layout.addWidget(self.resolved)
         out_layout.addWidget(self.editor.output)
+        out_layout.addWidget(section_title("Hardware"))
+        out_layout.addWidget(self.hardware_label)
+        out_layout.addLayout(hw_row)
         out_layout.addStretch(1)
         out_scroll = QScrollArea()
         out_scroll.setWidget(out_frame)
@@ -354,10 +448,12 @@ class BulkPage(QWidget):
         self.queue_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.queue_table.verticalHeader().setVisible(False)
         qh = self.queue_table.horizontalHeader()
-        qh.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        qh.setSectionResizeMode(Q_DETAILS, QHeaderView.ResizeMode.Stretch)
         self.queue_table.setColumnWidth(0, 32)
-        self.queue_table.setColumnWidth(1, 180)
-        self.queue_table.setColumnWidth(2, 130)
+        self.queue_table.setColumnWidth(1, 170)
+        self.queue_table.setColumnWidth(Q_OUTPUT, 120)
+        self.queue_table.setColumnWidth(Q_MODE, 120)
+        self.queue_table.setColumnWidth(Q_PROGRESS, 110)
         self.clear_completed_button = QPushButton("Clear Completed")
         self.clear_completed_button.setToolTip("Remove finished videos from the list. Their exported files are kept.")
         self.retry_button = QPushButton("Retry Failed")
@@ -365,12 +461,17 @@ class BulkPage(QWidget):
         self.resume_button = QPushButton("Resume Batch")
         self.cancel_button = QPushButton("Cancel Selected")
         self.cancel_button.setToolTip("Cancel the videos highlighted in the queue (or the ticked videos).")
+        self.cancel_all_button = QPushButton("Cancel Batch")
+        self.cancel_all_button.setToolTip("Cancel the running export and every video still waiting.")
+        self.log_button = QPushButton("View Log")
+        self.log_button.setToolTip("Details of the highlighted video's export: steps and their times, encoder, "
+                                   "warnings and errors.")
         self.open_button = QPushButton("Open Output Folder")
         queue_frame, queue_layout = panel("Processing Queue")
         queue_layout.addWidget(self.queue_table, 1)
         qrow = QHBoxLayout()
         for b in (self.clear_completed_button, self.retry_button, self.pause_button, self.resume_button,
-                  self.cancel_button, self.open_button):
+                  self.cancel_button, self.cancel_all_button, self.log_button, self.open_button):
             qrow.addWidget(b)
         queue_layout.addLayout(qrow)
 
@@ -378,7 +479,8 @@ class BulkPage(QWidget):
         self.summary = muted("")
         self.summary.setWordWrap(True)
         self.counts = {k: QLabel("0") for k in ("Total videos", "Selected", "Completed", "Processing", "Waiting",
-                                                 "Failed", "Total duration", "Output size")}
+                                                 "Failed", "Total duration", "Output size", "Elapsed",
+                                                 "Remaining (estimate)", "Current step")}
         self.overall = QProgressBar()
         self.overall.setRange(0, 100)
         self.start_button = QPushButton("▶  Start Batch")
@@ -407,11 +509,12 @@ class BulkPage(QWidget):
         bottom.addWidget(out_scroll)
         bottom.addWidget(queue_frame)
         bottom.addWidget(sum_frame)
-        bottom.setStretchFactor(0, 2)
+        bottom.setStretchFactor(0, 3)
         bottom.setStretchFactor(1, 4)
         bottom.setStretchFactor(2, 2)
+        bottom.setSizes([460, 900, 300])
         sum_frame.setMinimumWidth(280)
-        out_scroll.setMinimumWidth(320)
+        out_scroll.setMinimumWidth(380)
         main = QSplitter(Qt.Orientation.Vertical)
         main.addWidget(top)
         main.addWidget(bottom)
@@ -429,6 +532,7 @@ class BulkPage(QWidget):
         self.select_all.clicked.connect(self._on_select_all)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._update_buttons)
+        self.table.itemSelectionChanged.connect(self._update_resolved)
         self.queue_table.itemSelectionChanged.connect(self._update_buttons)
         self.apply_selected_button.clicked.connect(self.apply_to_selected)
         self.shared_button.clicked.connect(self.use_shared_for_selected)
@@ -448,6 +552,17 @@ class BulkPage(QWidget):
         self.browse_button.clicked.connect(self._browse_output)
         self.conflict.currentIndexChanged.connect(self._on_output_changed)
         self.start_button.clicked.connect(self.start)
+        self.cancel_all_button.clicked.connect(self.cancel_batch)
+        self.log_button.clicked.connect(self.show_log)
+        self.detect_button.clicked.connect(lambda: self.detect_hardware(refresh=True))
+        self.recommend_button.clicked.connect(self.use_recommended)
+        self.duplicate_preset_button.triggered.connect(self.duplicate_preset)
+        self._hw_signals = _HardwareSignals()
+        self._hw_signals.ready.connect(self._on_hardware)
+        self._clock = QTimer(self)
+        self._clock.setInterval(1000)
+        self._clock.timeout.connect(self._tick)
+        self._clock.start()
         self.pause_button.clicked.connect(self.pause)
         self.resume_button.clicked.connect(self.resume)
         self.cancel_button.clicked.connect(self.cancel_selected)
@@ -683,6 +798,21 @@ class BulkPage(QWidget):
             self.save()
         self._fill_presets(new)
 
+    def duplicate_preset(self) -> str | None:
+        name = self.selected_preset()
+        if not name:
+            return None
+        new, ok = QInputDialog.getText(self, "Duplicate Preset", "Name of the copy:", text=f"{name} copy")
+        if not ok:
+            return None
+        try:
+            new = self.services.render_presets.save(new, self.services.render_presets.get(name))
+        except StudioError as exc:
+            QMessageBox.warning(self, "Duplicate Preset", str(exc))
+            return None
+        self._fill_presets(new)
+        return new
+
     def delete_preset(self) -> None:
         name = self.selected_preset()
         if not name or QMessageBox.question(self, "Delete Preset", f"Delete the preset '{name}'?") \
@@ -696,6 +826,7 @@ class BulkPage(QWidget):
         self._fill_presets()
 
     def _on_shared_changed(self) -> None:
+        self._update_resolved()
         try:
             self.batch.shared = self.editor.preset()
             self.settings_error.setText("" if self.editor.enabled_operations() else
@@ -841,9 +972,178 @@ class BulkPage(QWidget):
     def play_source(self, item: BatchItem) -> None:
         SourcePreviewDialog(self, item.path, item.metadata.fps if item.metadata else None).exec()
 
+    # ------------------------------------------------------------------ folders
+    def folders(self) -> list[str]:
+        return sorted({str(Path(i.path).parent) for i in self.batch.items}, key=str.casefold)
+
+    def _fill_folder_menu(self) -> None:
+        self.folder_menu.clear()
+        for folder in self.folders():
+            count = sum(str(Path(i.path).parent) == folder for i in self.batch.items)
+            action = self.folder_menu.addAction(f"{folder}  ({count})")
+            action.triggered.connect(lambda _c=False, f=folder: self.select_folder(f))
+
+    def select_folder(self, folder: str) -> None:
+        """Tick exactly the videos in ``folder``."""
+        for item in self.batch.items:
+            item.selected = str(Path(item.path).parent) == folder
+        self.save()
+        self.refresh()
+
+    # ------------------------------------------------------------------ hardware
+    def detect_hardware(self, refresh: bool = False) -> None:
+        try:
+            ffmpeg = self.services.ffmpeg_path()
+        except StudioError:
+            ffmpeg = None
+        known = hardware.cached(ffmpeg) if not refresh else None
+        if known is not None:
+            self._on_hardware(known)
+            return
+        self.detect_button.setEnabled(False)
+        self.hardware_label.setText("Detecting hardware and testing encoders…")
+        self._thumb_pool.start(_HardwareJob(ffmpeg, refresh, self._hw_signals))
+
+    def _on_hardware(self, info) -> None:
+        self.detect_button.setEnabled(True)
+        self.hardware = info
+        if info is None:
+            self.hardware_label.setText("⚠ Hardware detection failed (see the log). Exports still work: the "
+                                        "encoder is tested when an export starts.")
+            return
+        rec = hardware.recommend(info)
+        self._recommendation = rec
+        self.hardware_label.setText("\n".join(info.summary_lines() + [
+            f"Recommended: Auto encoder ({rec.encoder_label}), {rec.max_renders} export(s) at a time."] + rec.notes))
+        self.recommend_button.setEnabled(True)
+        self.editor.output.set_hardware(info)
+        self._update_resolved()
+
+    def use_recommended(self) -> None:
+        rec = getattr(self, "_recommendation", None)
+        if rec is None:
+            return
+        settings = self.editor.output.settings()
+        settings.encoder = "auto"
+        self.editor.output.set_settings(settings)
+        self.services.settings.set("max_concurrent_renders", rec.max_renders)
+        self.summary.setText(f"Encoder: Auto ({rec.encoder_label}); {rec.max_renders} export(s) at a time. AI "
+                             "analysis (Whisper, face tracking) still runs one at a time.")
+        self._on_shared_changed()
+
+    def resolved_encoder(self, preset) -> tuple[str, str] | None:
+        """``(encoder label, processing mode)`` the export will use, once hardware was detected."""
+        info = getattr(self, "hardware", None)
+        if info is None:
+            return None
+        from ai_video_studio.core.ffmpeg_commands import EncoderUnavailableError, choose_video_encoder, encoder_family
+        from ai_video_studio.core.ffmpeg_commands import encoder_label as label_of
+
+        try:
+            codec, _reason = choose_video_encoder(preset.output.encoder, self.services.ffmpeg_path(),
+                                                  preset.output.codec, preset.output.allow_fallback)
+        except (EncoderUnavailableError, StudioError) as exc:
+            return f"⚠ {exc}", "—"
+        gpu = encoder_family(codec) != "cpu"
+        return label_of(codec), ("GPU-accelerated encoding" if gpu else "CPU encoding") + (
+            " · GPU decoding when possible" if preset.output.hw_decode == "auto" else "")
+
+    def _update_resolved(self) -> None:
+        """What will be rendered, from the same values the export uses."""
+        from ai_video_studio.render.layout import RESOLUTIONS, aspect_and_resolution
+
+        try:
+            preset = self.editor.preset()
+        except StudioError as exc:
+            self.resolved.setText(f"⚠ {exc}")
+            return
+        item = next(iter(self.highlighted_items() or self.selected_items() or self.batch.items), None)
+        meta = item.metadata if item is not None else None
+        rows = []
+        if preset.operation == "none":
+            size, aspect, res = ("each video's own size" if meta is None else
+                                 f"{meta.display_width} × {meta.display_height}"), "original", "Source"
+        else:
+            aspect_key, short = aspect_and_resolution(preset.resize)
+            src = (meta.display_width, meta.display_height) if meta else (1920, 1080)
+            w, h = output_size(preset, meta) if meta else preset.resize.output_size(*src)
+            size = f"{w} × {h}"
+            aspect = aspect_text(w, h) if aspect_key != "original" else "original"
+            res = RESOLUTIONS.get(short, "Custom") if aspect_key != "custom" else "Custom"
+            if meta and (w > meta.display_width * 1.01 and h > meta.display_height * 1.01):
+                rows.append("⚠ Larger than the source: the video is upscaled (no extra detail).")
+        rows = [f"<b>Aspect ratio:</b> {aspect}", f"<b>Output resolution:</b> {size}",
+                f"<b>Resolution preset:</b> {res}", f"<b>Quality:</b> {preset.output.describe()}"] + rows
+        encoder = self.resolved_encoder(preset)
+        rows += ([f"<b>Encoder:</b> {encoder[0]}", f"<b>Processing mode:</b> {encoder[1]}"] if encoder else
+                 ["<b>Encoder:</b> click Detect Hardware to see which encoder will be used"])
+        if item is not None and meta is not None:
+            try:
+                name = output_name(preset, item, 1, self.batch.preset_name)
+                rows.append(f"<b>File name:</b> {name}" + (" (e.g. for the first video)" if not
+                                                           self.highlighted_items() else ""))
+            except StudioError:
+                pass
+        if preset.output.mode == "draft":
+            rows.append("⚠ Draft is for checking framing, captions and cuts, not for final delivery.")
+        elif preset.output.mode in ("fast",):
+            rows.append("Faster encoding gives larger files or slightly lower quality than Standard.")
+        self.resolved.setText("<br>".join(rows))
+
+    # ------------------------------------------------------------------ progress details
+    def _tick(self) -> None:
+        if any(self.status(i)[0] in ("analyzing", "rendering") for i in self.batch.items if i.job_id):
+            self._fill_queue()
+            self._update_summary()
+
+    def cancel_batch(self) -> None:
+        targets = [i for i in self.batch.items if self.status(i)[0] in ("waiting", "held", "analyzing", "rendering")]
+        if targets and QMessageBox.question(self, "Cancel Batch", f"Cancel {len(targets)} video(s) that are "
+                                            "waiting or being exported? Finished videos are kept.") == \
+                QMessageBox.StandardButton.Yes:
+            self.cancel_items(targets)
+
+    def job_log(self, item: BatchItem) -> str:
+        """A readable record of one video's export (for View Log)."""
+        job = self.job(item)
+        lines = [f"Video: {item.path}", f"Output: {item.output or '(not set yet)'}"]
+        preset = self.batch.effective(item)
+        lines.append("Settings: " + (", ".join(preset_summary(preset)) or "re-encode only") +
+                     f"; {preset.output.describe()}")
+        if job is None:
+            lines.append("Not started.")
+            return "\n".join(lines)
+        lines.append(f"State: {job.state.value}" + (f" ({job.stage})" if job.stage else ""))
+        lines += [f"Queued: {job.created_at}", f"Started: {job.started_at or '-'}",
+                  f"Finished: {job.finished_at or '-'}"]
+        live = self.services.jobs.detail(job.id)
+        if live:
+            lines.append("Now: " + ", ".join(f"{k}: {v}" for k, v in live.items() if v is not None))
+        result = job.result or {}
+        if result.get("encoder_label"):
+            lines.append(f"Encoder used: {result['encoder_label']}")
+        if result.get("timings"):
+            lines.append("Time per step: " + ", ".join(f"{k.replace('_', ' ')} {format_seconds(v)}"
+                                                         for k, v in result["timings"].items()))
+        for warning in result.get("warnings") or []:
+            lines.append(f"Note: {warning}")
+        if job.error:
+            lines.append(f"Error: {job.error}")
+        lines.append(f"Application log folder: {paths.logs_dir()}")
+        return "\n".join(lines)
+
+    def show_log(self) -> None:
+        item = next(iter(self.queue_items() or self.highlighted_items()), None)
+        if item is None:
+            self.summary.setText("Highlight a video in the queue to see its log.")
+            return
+        LogDialog(self, item.name, self.job_log(item)).exec()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self.editor.fill_caption_styles()  # caption presets may have changed on the Captions page
+        if getattr(self, "hardware", None) is None and self.detect_button.isEnabled():
+            self.detect_hardware()
 
     # ------------------------------------------------------------------ thumbnails
     def _request_thumbnail(self, item: BatchItem) -> None:
@@ -905,13 +1205,42 @@ class BulkPage(QWidget):
         if job is not None and job.state is JobState.FAILED:
             return job.error or item.note
         if job is not None and job.state is JobState.COMPLETED:
+            result = job.result or {}
             text = f"Saved: {item.output}" if item.output else ""
-            if job.result and job.result.get("warnings"):
-                text += ("  ·  " if text else "") + " ".join(job.result["warnings"])
+            took = sum((result.get("timings") or {}).values())
+            if took:
+                text += f"  ·  done in {format_seconds(took)}"
+            if result.get("encoder_label"):
+                text += f" with {result['encoder_label']}"
+            if result.get("warnings"):
+                text += ("  ·  " if text else "") + " ".join(result["warnings"])
             return text
         if job is not None and job.state is JobState.RUNNING:
-            return "Analysing (Smart Cut, captions or faces)…" if job.stage == "analyzing" else "Encoding the video…"
+            return self.live_text(job)
         return item.note or item.error or ""
+
+    def live_text(self, job: Job) -> str:
+        """What a running export is doing: step, encoder, FFmpeg speed, elapsed and an estimate."""
+        live = self.services.jobs.detail(job.id)
+        parts = [live.get("step") or ("Analysing…" if job.stage == "analyzing" else "Encoding…")]
+        if job.stage != "analyzing" and live.get("encoder"):
+            parts.append(live["encoder"])
+        if job.stage != "analyzing" and live.get("speed"):
+            parts.append(f"{live['speed']:.2f}× realtime")
+        elapsed = seconds_since(job.started_at)
+        if elapsed is not None:
+            parts.append(f"elapsed {format_seconds(elapsed)}")
+            remaining = self.remaining_estimate(job, elapsed)
+            if remaining is not None:
+                parts.append(f"about {format_seconds(remaining)} left")
+        return "  ·  ".join(parts)
+
+    @staticmethod
+    def remaining_estimate(job: Job, elapsed: float) -> float | None:
+        """From the job's real progress so far; none until there is enough of it to be meaningful."""
+        if job.progress < 0.05 or elapsed < 10:
+            return None
+        return elapsed * (1 - job.progress) / job.progress
 
     def refresh(self) -> None:
         self._filling = True
@@ -1000,18 +1329,38 @@ class BulkPage(QWidget):
             number = QTableWidgetItem(str(n))
             number.setData(Qt.ItemDataRole.UserRole, item.id)
             self.queue_table.setItem(row, 0, number)
-            self.queue_table.setItem(row, 1, QTableWidgetItem(item.name))
+            name = QTableWidgetItem(item.name)
+            name.setToolTip(item.path)
+            self.queue_table.setItem(row, 1, name)
+            preset = self.batch.effective(item)
+            out = "-"
+            if item.metadata is not None:
+                try:
+                    w, h = output_size(preset, item.metadata)
+                    out = f"{w}×{h} ({aspect_text(w, h)})"
+                except StudioError:
+                    pass
+            out_cell = QTableWidgetItem(out)
+            out_cell.setToolTip(item.output or "")
+            self.queue_table.setItem(row, Q_OUTPUT, out_cell)
+            job = self.job(item)
+            mode = preset.output.describe()
+            if job is not None and job.result and job.result.get("encoder_label"):
+                mode += f" · {job.result['encoder_label']}"
+            mode_cell = QTableWidgetItem(mode)
+            mode_cell.setToolTip("Enabled: " + (", ".join(preset_summary(preset)) or "re-encode only"))
+            self.queue_table.setItem(row, Q_MODE, mode_cell)
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setValue(int(progress * 100))
-            self.queue_table.setCellWidget(row, 2, bar)
+            self.queue_table.setCellWidget(row, Q_PROGRESS, bar)
             state = QTableWidgetItem(STATUS_LABELS[status])
             if status in STATUS_COLORS:
                 state.setForeground(QColor(STATUS_COLORS[status]))
-            self.queue_table.setItem(row, 3, state)
+            self.queue_table.setItem(row, Q_STATUS, state)
             detail = QTableWidgetItem(self.details(item))
             detail.setToolTip(self.details(item))
-            self.queue_table.setItem(row, 4, detail)
+            self.queue_table.setItem(row, Q_DETAILS, detail)
             action = QToolButton()
             if status == "completed" and item.output:
                 action.setText("Show File")
@@ -1025,7 +1374,7 @@ class BulkPage(QWidget):
             else:
                 action.setEnabled(False)
                 action.setText("—")
-            self.queue_table.setCellWidget(row, 5, action)
+            self.queue_table.setCellWidget(row, Q_ACTION, action)
 
     def queue_items(self) -> list[BatchItem]:
         rows = sorted({i.row() for i in self.queue_table.selectionModel().selectedRows()})
@@ -1054,10 +1403,19 @@ class BulkPage(QWidget):
                   "Waiting": counts.get("waiting", 0) + counts.get("held", 0),
                   "Failed": counts.get("failed", 0) + counts.get("cancelled", 0),
                   "Total duration": format_duration(duration), "Output size": human_size(out_bytes)}
+        started = [s for i, s in zip(self.batch.items, statuses) if i.job_id or i.skipped]
+        overall = item_progress(started)
+        jobs = [self.job(i) for i in self.batch.items if i.job_id]
+        times = [seconds_since(j.started_at) for j in jobs if j is not None and j.started_at]
+        elapsed = max((t for t in times if t is not None), default=None)
+        running = [j for j in jobs if j is not None and j.state is JobState.RUNNING]
+        values["Elapsed"] = format_seconds(elapsed) if elapsed is not None and (running or overall < 1) else "-"
+        values["Remaining (estimate)"] = (format_seconds(elapsed * (1 - overall) / overall)
+                                          if running and elapsed and overall >= 0.05 else "-")
+        values["Current step"] = self.live_text(running[0]).split("  ·  ")[0] if running else "-"
         for name, value in values.items():
             self.counts[name].setText(str(value))
-        started = [s for i, s in zip(self.batch.items, statuses) if i.job_id or i.skipped]
-        self.overall.setValue(int(item_progress(started) * 100))
+        self.overall.setValue(int(overall * 100))
 
     def _update_buttons(self) -> None:
         selected = self.selected_items()
@@ -1078,6 +1436,10 @@ class BulkPage(QWidget):
         self.pause_button.setEnabled(JobState.QUEUED in states)
         self.resume_button.setEnabled(JobState.HELD in states)
         self.cancel_button.setEnabled(any(self._active(i) for i in (self.queue_items() or selected)))
+        self.cancel_all_button.setEnabled(bool(states & {JobState.QUEUED, JobState.HELD, JobState.RUNNING}))
+        self.log_button.setEnabled(bool(self.queue_items() or self.highlighted_items()))
+        self.edit_item_button.setEnabled(bool(self.highlighted_items()))
+        self.duplicate_preset_button.setEnabled(bool(self.selected_preset()))
         self.retry_button.setEnabled(bool(states & {JobState.FAILED, JobState.CANCELLED}))
         self.clear_completed_button.setEnabled(JobState.COMPLETED in states)
         self.open_button.setEnabled(bool(self.batch.output_dir) and Path(self.batch.output_dir).is_dir())
@@ -1142,7 +1504,21 @@ class BulkPage(QWidget):
         return settings
 
     def start(self) -> list[Job]:
-        """Queue one export job per ticked, ready video (they run one after another)."""
+        """Queue one export job per ticked, ready video (they run one after another).
+
+        A second click while starting does nothing, and a video that already has a job is never
+        queued again, so double clicks cannot start duplicate exports."""
+        if self._starting:
+            return []
+        self._starting = True
+        self.start_button.setEnabled(False)
+        try:
+            return self._start()
+        finally:
+            self._starting = False
+            self._update_buttons()
+
+    def _start(self) -> list[Job]:
         out_dir = self.batch.output_dir
         if not out_dir:
             QMessageBox.warning(self, "Start Batch", "Choose an output folder first.")
